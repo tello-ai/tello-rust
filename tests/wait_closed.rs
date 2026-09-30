@@ -7,6 +7,8 @@
 
 mod common;
 
+use std::time::Duration;
+
 use common::{error_frame, events_until, stream_frame, within, FakeGateway, ServerConn, QUIET};
 use serde_json::{json, Value};
 use tello::{Client, CreateCall, Error, Event, Events, SendDtmf};
@@ -189,9 +191,9 @@ async fn a_second_create_call_is_refused_without_ending_the_live_call() {
         CreateCall::new("+821012345678").request_id("first"),
     )
     .await;
-    let mut waiter = spawn_wait(&client);
     conn.send_json(stream_frame("call.created", json!({})))
         .await;
+    let mut waiter = spawn_wait(&client);
 
     let second = start_call(
         &client,
@@ -284,4 +286,173 @@ async fn close_4429_mid_call_ends_the_wait_with_session_replaced() {
         matches!(error, Error::SessionReplaced { .. }),
         "got {error:?}"
     );
+}
+
+#[tokio::test]
+async fn call_already_active_answering_the_opening_create_call_ends_the_wait() {
+    let gateway = FakeGateway::start().await;
+    let (client, mut events, mut conn) = common::connect(&gateway).await;
+
+    // The gateway still holds the previous call during its cleanup window, so
+    // this call never starts: no call.created, just the refusal.
+    let refused = start_call(
+        &client,
+        &mut conn,
+        CreateCall::new("+821012345678").request_id("a"),
+    )
+    .await;
+    let waiter = spawn_wait(&client);
+    conn.send_json(error_frame("callAlreadyActive", Some(&refused)))
+        .await;
+    let error = finish(waiter).await.expect_err("never started");
+    assert!(
+        matches!(&error, Error::CallAlreadyActive { code, .. } if code == "callAlreadyActive"),
+        "got {error:?}"
+    );
+
+    // Retrying opens a fresh call that the next wait follows to its end.
+    start_call(
+        &client,
+        &mut conn,
+        CreateCall::new("+821012345678").request_id("b"),
+    )
+    .await;
+    let mut waiter = spawn_wait(&client);
+    conn.send_json(stream_frame("call.created", json!({})))
+        .await;
+    assert_still_waiting(&mut conn, &mut events, &mut waiter).await;
+    conn.send_json(stream_frame(
+        "call.completed",
+        json!({ "status": "completed" }),
+    ))
+    .await;
+    assert!(finish(waiter).await.is_ok());
+}
+
+#[tokio::test]
+async fn a_wait_returns_when_its_call_ends_even_if_the_consumer_starts_the_next_one() {
+    let gateway = FakeGateway::start().await;
+    let (client, mut events, mut conn) = common::connect(&gateway).await;
+
+    start_call(
+        &client,
+        &mut conn,
+        CreateCall::new("+821012345678").request_id("a"),
+    )
+    .await;
+    let mut first_wait = spawn_wait(&client);
+    conn.send_json(stream_frame("call.created", json!({})))
+        .await;
+    assert_still_waiting(&mut conn, &mut events, &mut first_wait).await;
+
+    // The consumer loop starts the next call as soon as it sees the terminal,
+    // before the waiter gets to look at the client.
+    let consumer = {
+        let client = client.clone();
+        tokio::spawn(async move {
+            events_until(&mut events, |event| {
+                matches!(event, Event::CallCompleted(_))
+            })
+            .await;
+            client
+                .create_call(CreateCall::new("+821099999999").request_id("b"))
+                .await
+                .expect("createCall sent");
+            events
+        })
+    };
+    conn.send_json(stream_frame(
+        "call.completed",
+        json!({ "status": "completed" }),
+    ))
+    .await;
+    let mut events = within("consumer", consumer).await.expect("consumer task");
+    assert_eq!(conn.recv_json().await["data"]["requestId"], "b");
+    assert!(finish(first_wait).await.is_ok(), "the first call completed");
+
+    // The follow-up is a new call: the old call's createCall id no longer
+    // ends anything, and a new wait follows it to its own terminal.
+    let mut second_wait = spawn_wait(&client);
+    conn.send_json(error_frame("internalError", Some("a")))
+        .await;
+    assert_still_waiting(&mut conn, &mut events, &mut second_wait).await;
+    conn.send_json(stream_frame(
+        "call.completed",
+        json!({ "status": "completed" }),
+    ))
+    .await;
+    assert!(finish(second_wait).await.is_ok());
+}
+
+#[tokio::test]
+async fn a_reconnected_client_ignores_errors_echoing_a_call_from_before_the_drop() {
+    let gateway = FakeGateway::start().await;
+    let (client, _events, mut conn) = common::connect(&gateway).await;
+
+    start_call(
+        &client,
+        &mut conn,
+        CreateCall::new("+821012345678").request_id("before-drop"),
+    )
+    .await;
+    let waiter = spawn_wait(&client);
+    conn.send_json(stream_frame("call.created", json!({})))
+        .await;
+    drop(conn);
+    let error = finish(waiter).await.expect_err("dropped");
+    assert!(
+        matches!(error, Error::ConnectionClosed { .. }),
+        "got {error:?}"
+    );
+
+    let (client, mut events, mut conn) = common::connect(&gateway).await;
+    start_call(
+        &client,
+        &mut conn,
+        CreateCall::new("+821012345678").request_id("after-drop"),
+    )
+    .await;
+    let mut waiter = spawn_wait(&client);
+    conn.send_json(error_frame("internalError", Some("before-drop")))
+        .await;
+    assert_still_waiting(&mut conn, &mut events, &mut waiter).await;
+    conn.send_json(stream_frame(
+        "call.completed",
+        json!({ "status": "completed" }),
+    ))
+    .await;
+    assert!(finish(waiter).await.is_ok());
+}
+
+#[tokio::test]
+async fn a_create_call_that_fails_to_send_does_not_leave_a_wait_hanging() {
+    let gateway = FakeGateway::start().await;
+    // Far beyond WAIT: the reader must not be the one that ends the wait.
+    let config = gateway
+        .config()
+        .with_close_timeout(Duration::from_secs(600));
+    let (client, conn) = tokio::join!(Client::connect(config), gateway.accept_authed());
+    let (client, _events) = client.expect("connect");
+    let mut conn = conn;
+
+    // The server closes but keeps TCP open. Once the client's close reply
+    // arrives, its socket refuses new frames while the connection is not yet
+    // finished.
+    conn.send_close(1001, "shutting_down").await;
+    conn.expect_close().await;
+
+    let error = client
+        .create_call(CreateCall::new("+821012345678"))
+        .await
+        .expect_err("the socket refuses the frame");
+    assert!(
+        matches!(error, Error::ConnectionClosed { .. }),
+        "got {error:?}"
+    );
+    let waited = within("wait_closed", client.wait_closed()).await;
+    assert!(
+        matches!(waited, Err(Error::ConnectionClosed { .. })),
+        "got {waited:?}"
+    );
+    drop(conn);
 }

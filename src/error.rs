@@ -22,7 +22,9 @@ pub enum Error {
     Validation { code: String, message: String },
 
     /// `createCall` was sent while a call was already active. The running call
-    /// is unaffected.
+    /// is unaffected. [`Client::wait_closed`](crate::Client::wait_closed)
+    /// returns it only when it refused the `createCall` that opened the call:
+    /// the gateway was still finishing the previous one, so retry shortly.
     #[error("{message} ({code})")]
     CallAlreadyActive { code: String, message: String },
 

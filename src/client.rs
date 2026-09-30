@@ -9,7 +9,7 @@ use futures_util::stream::{SplitSink, SplitStream};
 use futures_util::{SinkExt, Stream, StreamExt};
 use serde_json::Value;
 use tokio::net::TcpStream;
-use tokio::sync::{mpsc, Notify};
+use tokio::sync::{mpsc, oneshot, Notify};
 use tokio::task::AbortHandle;
 use tokio_tungstenite::tungstenite::client::IntoClientRequest;
 use tokio_tungstenite::tungstenite::protocol::frame::coding::CloseCode;
@@ -20,7 +20,7 @@ use tokio_tungstenite::{Connector, MaybeTlsStream, WebSocketStream};
 use crate::command::{self, Answer, CreateCall, GetSummary, SendDtmf};
 use crate::config::{Config, ENV_API_KEY};
 use crate::error::{Error, TransportError, UNAUTHENTICATED};
-use crate::event::{self, Event};
+use crate::event::{self, ErrorEvent, Event};
 
 type Socket = WebSocketStream<MaybeTlsStream<TcpStream>>;
 type Writer = SplitSink<Socket, Message>;
@@ -29,10 +29,14 @@ type Reader = SplitStream<Socket>;
 const CLOSE_UNAUTHENTICATED: u16 = 4401;
 const CLOSE_SESSION_REPLACED: u16 = 4429;
 
-/// Error codes that never end [`Client::wait_closed`], even when they echo a
-/// `createCall` of the current call: `callAlreadyActive` means the running
-/// call continues, and `noActiveCall` is benign.
-const NON_ENDING_CODES: [&str; 2] = ["callAlreadyActive", "noActiveCall"];
+/// Refuses a `createCall` because a call is active. It ends
+/// [`Client::wait_closed`] only when it answers the `createCall` that opened
+/// the call: the gateway is still finishing the previous call, so this one
+/// never started. Answering a `createCall` sent during a live call, it leaves
+/// that call running.
+const CALL_ALREADY_ACTIVE: &str = "callAlreadyActive";
+/// Benign; never ends [`Client::wait_closed`].
+const NO_ACTIVE_CALL: &str = "noActiveCall";
 
 /// A connection to the gateway `/sdk` endpoint.
 ///
@@ -135,27 +139,27 @@ impl Client {
     /// command's error frames, which is how [`Client::wait_closed`] tells an
     /// error that ends the call from one that answers another command. Do not
     /// reuse it on other commands.
+    ///
+    /// When no call is active this opens a new one. During a live call the
+    /// gateway refuses it with `callAlreadyActive` and the live call goes on,
+    /// so it only joins that call's requestIds. If the frame cannot be sent,
+    /// the call it opened ends with the returned error.
     pub async fn create_call(&self, mut call: CreateCall) -> Result<String, Error> {
         let request_id = call
             .take_request_id()
             .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
-        {
+        let opened = {
             let mut state = self.inner.shared.state();
             state.ensure_open()?;
-            // A createCall during a live call is refused with
-            // callAlreadyActive and the live call continues, so its id joins
-            // that call's set instead of starting a new one.
-            if !state.call_active {
-                state.call_request_ids.clear();
-            }
-            state.call_request_ids.insert(request_id.clone());
-            state.call_active = true;
-            state.call_done = false;
-            state.call_error = None;
+            state.add_create_call(&request_id)
+        };
+        let sent = self
+            .send(command::create_call_frame(call, &request_id))
+            .await;
+        if let (Err(error), Some(generation)) = (&sent, opened) {
+            self.inner.shared.end_unsent_call(generation, error);
         }
-        self.send(command::create_call_frame(call, &request_id))
-            .await?;
-        Ok(request_id)
+        sent.map(|()| request_id)
     }
 
     /// Sends your reply to the current user turn. `answer.accepted` confirms
@@ -187,29 +191,36 @@ impl Client {
     /// `call.noAnswer`, `call.failed` or a `cancelled` status. Returns the
     /// mapped error when an error frame echoes one of this call's
     /// `createCall` requestIds (a refusal before `call.created`, or a stream
-    /// failure after it), except `callAlreadyActive` and `noActiveCall`.
-    /// Errors of other commands never end the wait; they only arrive as
+    /// failure after it), except `noActiveCall`, and `callAlreadyActive`
+    /// unless it answers the `createCall` that opened the call. Errors of
+    /// other commands never end the wait; they only arrive as
     /// [`Event::Error`]. Returns [`Error::ConnectionClosed`] when the socket
     /// closes while a call is active, and [`Error::SessionReplaced`] on close
     /// code 4429.
     ///
+    /// A wait started during a call returns when that call ends, even if a
+    /// follow-up call has started by the time it runs again. With no call
+    /// active it returns the last call's outcome at once (an error only to the
+    /// first wait that sees it), or, before the first call, waits for it.
+    ///
     /// Cancel-safe. Bound it with [`tokio::time::timeout`] if you need to.
     pub async fn wait_closed(&self) -> Result<(), Error> {
-        let shared = &self.inner.shared;
-        loop {
-            let mut changed = pin!(shared.changed.notified());
-            changed.as_mut().enable();
-            {
-                let mut state = shared.state();
-                if state.closed || state.call_done {
-                    if let Some(error) = &state.close_error {
-                        return Err(error.clone());
-                    }
-                    return state.call_error.take().map_or(Ok(()), Err);
+        let call_ended = {
+            let mut state = self.inner.shared.state();
+            if state.closed || (!state.call_active && state.call_generation > 0) {
+                if let Some(error) = &state.close_error {
+                    return Err(error.clone());
                 }
+                return state.call_error.take().map_or(Ok(()), Err);
             }
-            changed.await;
-        }
+            state.add_waiter()
+        };
+        // The sender lives in the state, which outlives this client clone.
+        call_ended.await.unwrap_or_else(|_| {
+            Err(Error::connection_closed(
+                "the connection closed before the call ended",
+            ))
+        })
     }
 
     /// Sends close code 1000 and waits up to the close timeout for the
@@ -280,17 +291,24 @@ impl Stream for Events {
 
 struct Shared {
     state: Mutex<State>,
-    /// Woken after every state change that can end a wait.
+    /// Woken when the connection finishes.
     changed: Notify,
 }
 
 struct State {
+    /// Whether a call is in progress, from the client's view.
     call_active: bool,
-    call_done: bool,
-    /// requestIds of the createCall commands sent for the current call. Only
-    /// an error echoing one of them ends the wait.
+    /// Counts the calls opened on this connection; `0` before the first.
+    call_generation: u64,
+    /// requestIds of the createCall commands sent during the current call.
+    /// Only an error echoing one of them ends it.
     call_request_ids: HashSet<String>,
-    /// Ends the current wait once, then is cleared.
+    /// The createCall that opened the current call.
+    opening_request_id: String,
+    /// Waits pending on the current call, released when it ends. Before the
+    /// first call they wait for it.
+    waiters: Vec<oneshot::Sender<Result<(), Error>>>,
+    /// The error the last call ended with, until one wait returns it.
     call_error: Option<Error>,
     /// Sticky connection-level failure.
     close_error: Option<Error>,
@@ -303,8 +321,10 @@ impl State {
     fn new(events: mpsc::UnboundedSender<Event>) -> Self {
         Self {
             call_active: false,
-            call_done: false,
+            call_generation: 0,
             call_request_ids: HashSet::new(),
+            opening_request_id: String::new(),
+            waiters: Vec::new(),
             call_error: None,
             close_error: None,
             closed: false,
@@ -322,9 +342,62 @@ impl State {
             .unwrap_or_else(|| Error::connection_closed("the client is not connected")))
     }
 
-    fn end_call(&mut self) {
+    /// Records a createCall about to be sent. Opens a new call and returns its
+    /// generation when none is active; during a live call the gateway refuses
+    /// it and the live call continues, so its id only joins that call's set.
+    fn add_create_call(&mut self, request_id: &str) -> Option<u64> {
+        if self.call_active {
+            self.call_request_ids.insert(request_id.to_owned());
+            return None;
+        }
+        self.call_generation += 1;
+        self.call_request_ids.clear();
+        self.call_request_ids.insert(request_id.to_owned());
+        request_id.clone_into(&mut self.opening_request_id);
+        self.call_active = true;
+        self.call_error = None;
+        Some(self.call_generation)
+    }
+
+    /// Whether `error` ends the current call: it echoes one of the call's
+    /// createCall requestIds and is not a refusal that leaves it running.
+    fn error_ends_call(&self, error: &ErrorEvent) -> bool {
+        let Some(request_id) = error.request_id.as_deref() else {
+            return false;
+        };
+        if !self.call_active || !self.call_request_ids.contains(request_id) {
+            return false;
+        }
+        match error.code.as_str() {
+            NO_ACTIVE_CALL => false,
+            CALL_ALREADY_ACTIVE => request_id == self.opening_request_id,
+            _ => true,
+        }
+    }
+
+    fn add_waiter(&mut self) -> oneshot::Receiver<Result<(), Error>> {
+        // Drop the slots of waits that were cancelled during this call.
+        self.waiters.retain(|waiter| !waiter.is_closed());
+        let (waiter, call_ended) = oneshot::channel();
+        self.waiters.push(waiter);
+        call_ended
+    }
+
+    /// Ends the current call with `outcome`. The waits pending on it return
+    /// that outcome; if none is left to take an error, the next wait does.
+    fn end_call(&mut self, outcome: Result<(), Error>) {
         self.call_active = false;
-        self.call_done = true;
+        let delivered = self.release_waiters(&outcome);
+        self.call_error = if delivered { None } else { outcome.err() };
+    }
+
+    /// Returns whether any pending wait received `outcome`.
+    fn release_waiters(&mut self, outcome: &Result<(), Error>) -> bool {
+        let mut delivered = false;
+        for waiter in self.waiters.drain(..) {
+            delivered |= waiter.send(outcome.clone()).is_ok();
+        }
+        delivered
     }
 
     fn emit(&self, event: Event) {
@@ -353,28 +426,28 @@ impl Shared {
             Event::Error(error) => {
                 if error.code == UNAUTHENTICATED {
                     state.close_error = Some(error.to_error());
-                } else if state.call_active
-                    && error
-                        .request_id
-                        .as_ref()
-                        .is_some_and(|id| state.call_request_ids.contains(id))
-                    && !NON_ENDING_CODES.contains(&error.code.as_str())
-                {
+                } else if state.error_ends_call(error) {
                     // This call's createCall failed: refused before
                     // call.created, or its stream failed after it. No terminal
-                    // frame follows, so end the wait with the mapped error.
-                    state.call_error = Some(error.to_error());
-                    state.end_call();
+                    // frame follows, so end the call with the mapped error.
+                    state.end_call(Err(error.to_error()));
                 }
             }
-            event if event.is_terminal() => state.end_call(),
+            event if event.is_terminal() && state.call_active => state.end_call(Ok(())),
             _ => {}
         }
         // State first, then the event: a consumer that sees a terminal event
         // can immediately start the next call.
         state.emit(event);
-        drop(state);
-        self.changed.notify_waiters();
+    }
+
+    /// Ends the call opened by a createCall whose frame was never sent, unless
+    /// that call already ended.
+    fn end_unsent_call(&self, generation: u64, error: &Error) {
+        let mut state = self.state();
+        if state.call_active && state.call_generation == generation {
+            state.end_call(Err(error.clone()));
+        }
     }
 
     fn note_close(&self, frame: Option<&CloseFrame>) {
@@ -408,7 +481,8 @@ impl Shared {
             ));
         }
         state.call_active = false;
-        state.call_done = true;
+        let outcome = state.close_error.clone().map_or(Ok(()), Err);
+        state.release_waiters(&outcome);
         state.emit(Event::Disconnected);
         state.events = None;
         drop(state);
