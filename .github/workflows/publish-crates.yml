@@ -1,0 +1,31 @@
+name: Publish crates.io
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Check the tag matches the Cargo.toml version
+        run: |
+          TAG_VERSION="${GITHUB_REF_NAME#v}"
+          CRATE_VERSION="$(cargo metadata --no-deps --format-version 1 | jq -r '.packages[] | select(.name == "tello-ai-sdk") | .version')"
+          if [ "$TAG_VERSION" != "$CRATE_VERSION" ]; then
+            echo "tag ${GITHUB_REF_NAME} does not match Cargo.toml version ${CRATE_VERSION}"
+            exit 1
+          fi
+      - run: cargo test --locked
+      - run: cargo publish --locked
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
