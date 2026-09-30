@@ -19,10 +19,19 @@ tello-java.
 - `Events`: a lossless, single-consumer event queue that is also a `Stream`,
   with a typed variant per frame type, `Disconnected`, and `Unknown` for types
   added later. Every event keeps its raw frame.
-- `wait_closed` ends on a terminal event, on an error echoing one of the current
-  call's `createCall` requestIds (except `callAlreadyActive` and
-  `noActiveCall`), or when the connection closes mid-call. Errors of other
-  commands arrive only as events.
+- `wait_closed` ends on a terminal event (after `cancel`, the gateway's
+  `cancelled` status change), on an error echoing one of the current call's
+  `createCall` requestIds, or when the connection closes mid-call. Errors of
+  other commands arrive only as events. `noActiveCall` never ends it;
+  `callAlreadyActive` ends it only when it answers the `createCall` that
+  opened the call, which means the gateway is still finishing the previous
+  call and the caller can retry shortly.
+- A `create_call` sent during a live call only joins that call's requestIds; it
+  no longer resets the pending wait. A `create_call` whose frame cannot be sent
+  ends the call it opened with the send error, so no wait is left hanging.
+- Behavior change: a wait in progress returns when its own call ends, even if
+  the event consumer starts a follow-up call before the waiter runs.
+  Previously it could miss that end and keep waiting into the follow-up call.
 - `Error` maps all 19 codes of `errors.v1.json` and exposes the gateway code;
   `ErrorEvent::to_error` turns an error event into the same typed error.
 - The read task never waits for the event consumer, so heartbeat pings are

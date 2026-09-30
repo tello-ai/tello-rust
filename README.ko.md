@@ -140,17 +140,23 @@ GetSummary::new(call_id).request_id(id)
 ```
 
 지정하지 않았거나 `""`로 지정한 선택 필드는 프레임에서 빠집니다. `cancel`은
-`{"event":"cancel","data":{}}`를 보냅니다. `requestId`는 명령과 응답 프레임을
+`{"event":"cancel","data":{}}`를 보냅니다. 그러면 게이트웨이는 `status`가
+`cancelled`인 `call.statusChanged`로 통화를 끝내며, 이것이 종료 이벤트입니다
+(`call.completed`는 뒤따르지 않습니다). `requestId`는 명령과 응답 프레임을
 짝지어 주는 값이며, 멱등성 키가 아닙니다.
 
 `create_call`은 항상 `requestId`를 보냅니다. 넘긴 값이 비어 있지 않으면 그 값을,
 아니면 생성한 UUID v4를 쓰고, 보낸 값을 반환합니다. 게이트웨이는 이 명령의 오류
 프레임에 그 값을 되돌려 싣고, `wait_closed`는 그것으로 오류가 통화를 끝내는지
-판단합니다. 그러니 이 값을 다른 명령에 다시 쓰지 마세요.
+판단합니다. 명령마다 `requestId`를 따로 쓰고, `create_call`의 값을 `answer`,
+`send_dtmf`, `get_summary`에 다시 쓰지 마세요. 그 값을 되돌려 실은 오류는
+대기를 끝냅니다.
 
 `client.wait_closed()`는 현재 통화가 종료 상태(`call.completed` /
 `call.noAnswer` / `call.failed`, 또는 `cancelled` 상태)에 이르거나, 이 통화의
-`create_call`에 대한 오류가 오거나, 연결이 닫히면 반환합니다. cancel-safe이며,
+`create_call`에 대한 오류가 오거나, 연결이 닫히면 반환합니다. 진행 중인 대기는
+그 사이 이벤트 루프가 후속 통화를 시작했더라도 자기 통화가 끝나면 반환합니다.
+후속 통화를 기다리려면 `wait_closed`를 다시 호출하세요. cancel-safe이며,
 무한정 기다리지 않으려면 `tokio::time::timeout`으로 상한을 거세요.
 
 `client.close()`는 close code 1000을 보내고, 게이트웨이가 핸드셰이크를 마칠
@@ -158,7 +164,10 @@ GetSummary::new(call_id).request_id(id)
 핸드셰이크 없이 연결이 끊깁니다.
 
 연결 하나에는 활성 통화가 하나뿐입니다. 통화 중에 `create_call`을 또 보내면
-`callAlreadyActive`로 거부되고 진행 중인 통화는 계속됩니다.
+`callAlreadyActive`로 거부되고 진행 중인 통화는 계속됩니다. 통화가 막 끝난
+직후에는 게이트웨이가 아직 그 통화를 정리하고 있어 다음 `create_call`도
+`callAlreadyActive`로 거부될 수 있습니다. 이 통화는 시작되지 않았으므로
+`wait_closed`는 `Error::CallAlreadyActive`를 반환하고, 잠시 뒤 재시도하면 됩니다.
 
 ## 6. 오류 처리
 
@@ -213,10 +222,12 @@ SDK가 직접 만드는 오류는 네 가지입니다:
 그래서 거부된 `create_call`(예: `toRequired`, `callRejected`,
 `insufficientCredit`)이 멈춘 채 남지 않고, `call.created` 이후 스트림이 실패한
 통화도 마찬가지입니다(게이트웨이가 그 실패도 `create_call`에 대한 오류로 보냅니다).
-`callAlreadyActive`와 `noActiveCall`은 id가 일치해도 절대 끝내지 않습니다.
-`answer`, `send_dtmf`, `get_summary`, `cancel`이 실패해도 통화는 끝나지 않으므로,
-그 오류는 `Event::Error`로만 전달되고 `wait_closed`는 계속 기다립니다.
-`wait_closed`가 반환하는 오류:
+`callAlreadyActive`는 통화를 연 `create_call`에 대한 응답일 때만 대기를 끝냅니다
+(게이트웨이가 아직 이전 통화를 정리하는 중이니 잠시 뒤 재시도하세요). 통화 중에
+보낸 `create_call`에 대한 응답이면 이벤트로만 전달됩니다. `noActiveCall`은 id가
+일치해도 절대 끝내지 않습니다. `answer`, `send_dtmf`, `get_summary`, `cancel`이
+실패해도 통화는 끝나지 않으므로, 그 오류는 `Event::Error`로만 전달되고
+`wait_closed`는 계속 기다립니다. `wait_closed`가 반환하는 오류:
 
 - 통화 시작 거부, 또는 `call.created` 이후 통화 스트림 실패 → 위 표의 대응 variant
 - 통화 도중 연결 끊김 → `Error::ConnectionClosed`
@@ -224,7 +235,8 @@ SDK가 직접 만드는 오류는 네 가지입니다:
 
 인증 실패는 `connect`가 직접 반환합니다.
 
-오류 이벤트를 처리할 때는 같은 타입의 오류로 바꿔 쓰면 됩니다:
+오류 이벤트를 처리할 때는 `ErrorEvent::to_error`로 같은 타입의 오류로 바꿔 쓰면
+됩니다:
 
 ```rust
 if let Event::Error(error_event) = event {

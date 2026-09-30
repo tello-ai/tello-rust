@@ -141,18 +141,25 @@ GetSummary::new(call_id).request_id(id)
 ```
 
 Optional fields you do not set, or set to `""`, are left out of the frame.
-`cancel` sends `{"event":"cancel","data":{}}`. A `requestId` correlates a
-command with its response frame; it is not an idempotency key.
+`cancel` sends `{"event":"cancel","data":{}}`; the gateway then ends the call
+with `call.statusChanged` status `cancelled`, which is the terminal event (no
+`call.completed` follows). A `requestId` correlates a command with its response
+frame; it is not an idempotency key.
 
 `create_call` always sends a `requestId`: yours when non-empty, otherwise a
 generated UUID v4. It returns the id it sent. The gateway echoes that id on the
 error frames of this command, which is how `wait_closed` knows an error ends
-the call, so do not reuse it on other commands.
+the call. Give each command its own `requestId` and never reuse the
+`create_call` one on `answer`, `send_dtmf` or `get_summary`: an error echoing it
+ends the wait.
 
 `client.wait_closed()` returns when the current call reaches a terminal state
 (`call.completed` / `call.noAnswer` / `call.failed`, or a `cancelled` status),
 when an error answers this call's `create_call`, or when the connection closes.
-It is cancel-safe; bound it with `tokio::time::timeout` if you need to.
+A wait in progress returns when its own call ends, even if your event loop has
+already started a follow-up call by then; call `wait_closed` again to wait for
+the follow-up. It is cancel-safe; bound it with `tokio::time::timeout` if you
+need to.
 
 `client.close()` sends close code 1000 and waits up to the close timeout for
 the gateway to finish the handshake. Dropping the last `Client` clone tears the
@@ -160,6 +167,10 @@ connection down without a close handshake.
 
 One connection carries one active call at a time. A second `create_call` during
 a live call is refused with `callAlreadyActive` and the live call continues.
+Right after a call ends the gateway may still be finishing it, so the next
+`create_call` can also be refused with `callAlreadyActive`; that call never
+started, `wait_closed` returns `Error::CallAlreadyActive`, and you can retry
+shortly.
 
 ## 6. Error handling
 
@@ -214,10 +225,13 @@ error that echoes one of this call's `create_call` requestIds ends
 `wait_closed`, so a refused `create_call` (e.g. `toRequired`, `callRejected`,
 `insufficientCredit`) does not hang, and neither does a call whose stream fails
 after `call.created` (the gateway reports that against `create_call` too).
-`callAlreadyActive` and `noActiveCall` never end it, even with a matching id. A
-failed `answer`, `send_dtmf`, `get_summary` or `cancel` does not end the call:
-its error is delivered only as an `Event::Error` and `wait_closed` keeps
-waiting. `wait_closed` returns:
+`callAlreadyActive` ends it only when it answers the `create_call` that opened
+the call (the gateway is still finishing the previous call, so retry shortly);
+answering a `create_call` sent during a live call it is only an event.
+`noActiveCall` never ends it, even with a matching id. A failed `answer`,
+`send_dtmf`, `get_summary` or `cancel` does not end the call: its error is
+delivered only as an `Event::Error` and `wait_closed` keeps waiting.
+`wait_closed` returns:
 
 - a call-start refusal, or a failure of the call's stream after `call.created` → its mapped variant above
 - the connection dropping mid-call → `Error::ConnectionClosed`
@@ -225,7 +239,8 @@ waiting. `wait_closed` returns:
 
 Authentication failures are returned by `connect` itself.
 
-To act on an error event, turn it into the same typed error:
+To act on an error event, turn it into the same typed error with
+`ErrorEvent::to_error`:
 
 ```rust
 if let Event::Error(error_event) = event {
