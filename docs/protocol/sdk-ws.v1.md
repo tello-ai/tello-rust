@@ -83,7 +83,9 @@ SDK는 세 경우를 모두 `AuthenticationError`(언어별 대응 클래스)로
 }}
 ```
 
-이미 활성 통화가 있으면 error `callAlreadyActive`.
+이미 활성 통화가 있으면 error `callAlreadyActive`. 직전 통화의 종단 이벤트를 보낸 뒤에도
+게이트웨이가 그 통화의 정리를 마칠 때까지(짧은 구간) 세션을 붙잡고 있으므로, 그 사이에 온
+`createCall`도 `callAlreadyActive`를 받는다. 이때는 `call.created`가 오지 않으니 잠시 뒤 다시 보낸다.
 
 에이전트는 서버가 정한다. `agentId`는 명령에 없으며, 옛 클라이언트가 보내도 무시하고
 Voice Gateway 요청에도 싣지 않는다.
@@ -128,7 +130,8 @@ Voice Gateway 요청에도 싣지 않는다.
 { "event": "cancel", "data": {} }
 ```
 
-활성 통화가 없으면 무시(no-op). 취소가 반영되면 `call.statusChanged`가 `status: "cancelled"`로 온다.
+활성 통화가 없으면 무시(no-op). 취소가 반영되면 `call.statusChanged`가 `status: "cancelled"`로 오고,
+`previousStatus`는 취소 직전의 상태다. 이 프레임이 그 통화의 종단 이벤트다.
 
 ### 4.5 `getSummary`
 

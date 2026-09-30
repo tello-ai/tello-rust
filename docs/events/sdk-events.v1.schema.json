@@ -1,6 +1,6 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://tello.ai/schemas/sdk-events.v1.schema.json",
+  "$id": "https://telloai.io/schemas/sdk-events.v1.schema.json",
   "title": "Tello SDK WebSocket Events",
   "description": "Inbound flat frames sent by turn-provider-gateway /sdk to SDK clients. Dispatch on `type`. All keys are camelCase. Source: turn-provider-gateway/src/infrastructure/ws/sdk-events.ts and sdk-protocol.ts. Canonical path: turn-provider-gateway/docs/events/sdk-events.v1.schema.json — copies inside SDK client repos are generated, edit the canonical file then copy outward.",
   "oneOf": [
