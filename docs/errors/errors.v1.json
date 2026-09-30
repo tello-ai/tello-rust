@@ -1,0 +1,140 @@
+{
+  "version": "1.0",
+  "source": "turn-provider-gateway/src/infrastructure/ws/sdk-protocol.ts",
+  "canonicalPath": "turn-provider-gateway/docs/errors/errors.v1.json",
+  "note": "Copies of this file inside SDK client repos are generated. Edit the canonical path, then copy outward.",
+  "frame": {
+    "description": "Flat error frame sent by turn-provider-gateway /sdk (not wrapped in an {error:{...}} envelope).",
+    "fields": {
+      "type": "error",
+      "version": "1.0",
+      "code": "string",
+      "message": "string (TPG's own English sentence for the code; display text only, never branch on it)",
+      "requestId": "string (optional, echoes the client's requestId on the failed command)",
+      "question": "string (optional, present for callRejected)"
+    }
+  },
+  "errors": [
+    {
+      "code": "unauthenticated",
+      "message": "Authentication required",
+      "closeCode": 4401,
+      "sdkException": "AuthenticationError",
+      "note": "The client's own api key was refused, or no auth frame arrived within 10s."
+    },
+    {
+      "code": "callAlreadyActive",
+      "message": "A call is already active",
+      "sdkException": "CallAlreadyActiveError"
+    },
+    {
+      "code": "toRequired",
+      "message": "to is required",
+      "sdkException": "ValidationError"
+    },
+    {
+      "code": "callIdRequired",
+      "message": "callId is required",
+      "sdkException": "ValidationError"
+    },
+    {
+      "code": "callNotFound",
+      "message": "Call not found",
+      "sdkException": "ValidationError"
+    },
+    {
+      "code": "callNotCompleted",
+      "message": "Call is not completed",
+      "sdkException": "ValidationError"
+    },
+    {
+      "code": "noActiveCall",
+      "message": "No active call",
+      "sdkException": "NoActiveCallError"
+    },
+    {
+      "code": "dtmfDigitsRequired",
+      "message": "digits is required",
+      "sdkException": "ValidationError"
+    },
+    {
+      "code": "dtmfDigitsInvalid",
+      "message": "digits must contain only 0-9, *, #",
+      "sdkException": "ValidationError"
+    },
+    {
+      "code": "callRejected",
+      "message": "Call rejected",
+      "sdkException": "CallRejectedError",
+      "extra": ["question"]
+    },
+    {
+      "code": "insufficientCredit",
+      "message": "The account has no call credit remaining",
+      "sdkException": "CallRefusedError",
+      "group": "accountPolicy",
+      "retryable": false,
+      "note": "Tell the user to top up. TPG also emits this from its own pre-dial credit check."
+    },
+    {
+      "code": "concurrentLimitExceeded",
+      "message": "The account is already using all of its concurrent outbound call lines",
+      "sdkException": "CallRefusedError",
+      "group": "accountPolicy",
+      "retryable": true,
+      "note": "Wait for one of the account's own calls to end, then issue a new createCall."
+    },
+    {
+      "code": "callerNotVerified",
+      "message": "The callee number is not a verified number for this account",
+      "sdkException": "CallRefusedError",
+      "group": "accountPolicy",
+      "retryable": false,
+      "note": "Tell the user to verify the number first."
+    },
+    {
+      "code": "noRepresentativeNumber",
+      "message": "No outbound caller number is configured for this account",
+      "sdkException": "CallRefusedError",
+      "group": "accountPolicy",
+      "retryable": false,
+      "note": "Tell the user to configure an outbound caller number."
+    },
+    {
+      "code": "callProviderUnauthorized",
+      "message": "The call provider rejected this service's credentials",
+      "sdkException": "CallProviderError",
+      "group": "serviceSide",
+      "retryable": false,
+      "note": "Not unauthenticated: these are credentials the client does not hold. Surface as a service fault."
+    },
+    {
+      "code": "callProviderDraining",
+      "message": "The call provider is not accepting new calls",
+      "sdkException": "CallProviderError",
+      "group": "serviceSide",
+      "retryable": true
+    },
+    {
+      "code": "callProviderUnavailable",
+      "message": "The call provider could not create the media room for this call",
+      "sdkException": "CallProviderError",
+      "group": "serviceSide",
+      "retryable": true
+    },
+    {
+      "code": "callSetupFailed",
+      "message": "The call provider declined to start the call",
+      "sdkException": "CallProviderError",
+      "group": "serviceSide",
+      "retryable": false,
+      "note": "The provider refused and TPG could not classify the refusal. Distinct from internalError: no call was created."
+    },
+    {
+      "code": "internalError",
+      "message": "Internal error",
+      "sdkException": "TelloServerError",
+      "note": "Reserved for faults inside TPG itself."
+    }
+  ]
+}

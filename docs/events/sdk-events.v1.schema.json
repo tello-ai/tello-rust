@@ -1,0 +1,158 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://tello.ai/schemas/sdk-events.v1.schema.json",
+  "title": "Tello SDK WebSocket Events",
+  "description": "Inbound flat frames sent by turn-provider-gateway /sdk to SDK clients. Dispatch on `type`. All keys are camelCase. Source: turn-provider-gateway/src/infrastructure/ws/sdk-events.ts and sdk-protocol.ts. Canonical path: turn-provider-gateway/docs/events/sdk-events.v1.schema.json — copies inside SDK client repos are generated, edit the canonical file then copy outward.",
+  "oneOf": [
+    { "$ref": "#/$defs/authOk" },
+    { "$ref": "#/$defs/callCreated" },
+    { "$ref": "#/$defs/answerAccepted" },
+    { "$ref": "#/$defs/dtmfAccepted" },
+    { "$ref": "#/$defs/callStatusChanged" },
+    { "$ref": "#/$defs/userTurn" },
+    { "$ref": "#/$defs/agentTurn" },
+    { "$ref": "#/$defs/callCompleted" },
+    { "$ref": "#/$defs/callNoAnswer" },
+    { "$ref": "#/$defs/callFailed" },
+    { "$ref": "#/$defs/callSummary" },
+    { "$ref": "#/$defs/error" }
+  ],
+  "$defs": {
+    "base": {
+      "type": "object",
+      "required": ["type", "version", "sessionId", "callId", "timestamp"],
+      "properties": {
+        "type": { "type": "string" },
+        "version": { "type": "string", "const": "1.0" },
+        "sessionId": { "type": "string" },
+        "callId": { "type": "string" },
+        "timestamp": { "type": "string", "format": "date-time" }
+      }
+    },
+    "status": {
+      "type": "string",
+      "enum": ["queued", "dialing", "ringing", "inProgress", "transferring", "completed", "noAnswer", "failed", "cancelled"]
+    },
+    "authOk": {
+      "description": "Reply to the auth handshake frame. Not a call-stream event: it carries no sessionId, callId or timestamp. SDKs consume it inside connect() and do not re-emit it.",
+      "type": "object",
+      "required": ["type", "version", "accountId"],
+      "properties": {
+        "type": { "const": "auth.ok" },
+        "version": { "type": "string", "const": "1.0" },
+        "accountId": { "type": "string" },
+        "requestId": { "type": "string" }
+      }
+    },
+    "callCreated": {
+      "description": "First frame after createCall provisions the call. Represents the initial `queued` state; a call.statusChanged frame follows only once the status leaves queued.",
+      "allOf": [{ "$ref": "#/$defs/base" }],
+      "properties": { "type": { "const": "call.created" } }
+    },
+    "answerAccepted": {
+      "description": "The answer command was validated and forwarded to Voice Gateway. Not a delivery guarantee: the utterance is confirmed by a later agent.turn.",
+      "allOf": [{ "$ref": "#/$defs/base" }],
+      "properties": {
+        "type": { "const": "answer.accepted" },
+        "requestId": { "type": "string" },
+        "messageId": { "type": "string" }
+      },
+      "required": ["messageId"]
+    },
+    "dtmfAccepted": {
+      "description": "The sendDtmf command was validated and forwarded. Tones are not a spoken turn, so no agent.turn follows.",
+      "allOf": [{ "$ref": "#/$defs/base" }],
+      "properties": {
+        "type": { "const": "dtmf.accepted" },
+        "requestId": { "type": "string" },
+        "messageId": { "type": "string" },
+        "digits": { "type": "string" }
+      },
+      "required": ["messageId", "digits"]
+    },
+    "callStatusChanged": {
+      "description": "Progress statuses are deduplicated against the last published status. A call already answered when Voice Gateway sees it skips straight to inProgress, so clients must not depend on dialing/ringing appearing. Cancellation also arrives here with status `cancelled`.",
+      "allOf": [{ "$ref": "#/$defs/base" }],
+      "properties": {
+        "type": { "const": "call.statusChanged" },
+        "status": { "$ref": "#/$defs/status" },
+        "previousStatus": { "$ref": "#/$defs/status" }
+      },
+      "required": ["status", "previousStatus"]
+    },
+    "userTurn": {
+      "allOf": [{ "$ref": "#/$defs/base" }],
+      "properties": {
+        "type": { "const": "user.turn" },
+        "turnIndex": { "type": "integer" },
+        "text": { "type": "string" }
+      },
+      "required": ["turnIndex", "text"]
+    },
+    "agentTurn": {
+      "description": "Emitted from the Voice Gateway agent_turn event once the text was actually spoken. A turn abandoned on assistant-timeout produces no agent.turn.",
+      "allOf": [{ "$ref": "#/$defs/base" }],
+      "properties": {
+        "type": { "const": "agent.turn" },
+        "turnIndex": { "type": "integer" },
+        "text": { "type": "string" }
+      },
+      "required": ["turnIndex", "text"]
+    },
+    "callCompleted": {
+      "allOf": [{ "$ref": "#/$defs/base" }],
+      "properties": {
+        "type": { "const": "call.completed" },
+        "status": { "const": "completed" }
+      },
+      "required": ["status"]
+    },
+    "callNoAnswer": {
+      "allOf": [{ "$ref": "#/$defs/base" }],
+      "properties": {
+        "type": { "const": "call.noAnswer" },
+        "status": { "const": "noAnswer" },
+        "failureReason": { "type": "string" }
+      },
+      "required": ["status"]
+    },
+    "callFailed": {
+      "allOf": [{ "$ref": "#/$defs/base" }],
+      "properties": {
+        "type": { "const": "call.failed" },
+        "status": { "const": "failed" },
+        "failureReason": { "type": "string" }
+      },
+      "required": ["status"]
+    },
+    "callSummary": {
+      "description": "Reply to getSummary. A command response rather than a call-stream event: it carries no sessionId and no timestamp.",
+      "type": "object",
+      "required": ["type", "version", "callId", "status", "durationSeconds", "transcript", "summary", "creditCharged"],
+      "properties": {
+        "type": { "const": "call.summary" },
+        "version": { "type": "string", "const": "1.0" },
+        "requestId": { "type": "string" },
+        "callId": { "type": "string" },
+        "status": { "$ref": "#/$defs/status" },
+        "durationSeconds": { "type": ["integer", "null"] },
+        "transcript": { "type": ["string", "null"] },
+        "summary": { "type": ["string", "null"] },
+        "creditCharged": { "type": ["number", "null"] }
+      }
+    },
+    "error": {
+      "description": "Command failure. Codes and their SDK exception mapping are in ../errors/errors.v1.json. Carries no sessionId, callId or timestamp.",
+      "type": "object",
+      "required": ["type", "version", "code", "message"],
+      "properties": {
+        "type": { "const": "error" },
+        "version": { "type": "string", "const": "1.0" },
+        "code": { "type": "string" },
+        "message": { "type": "string" },
+        "requestId": { "type": "string" },
+        "question": { "type": "string" }
+      }
+    }
+  }
+}
