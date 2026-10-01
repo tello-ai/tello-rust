@@ -129,6 +129,21 @@ async fn upgrade_url_keeps_the_path_and_other_query_and_overrides_identity_keys(
 }
 
 #[tokio::test]
+async fn upgrade_url_drops_encoded_identity_keys_and_keeps_other_pairs_verbatim() {
+    let gateway = FakeGateway::start().await;
+    let base = gateway.url().trim_end_matches("/sdk").to_owned();
+    let target = upgrade_target(
+        &gateway,
+        format!("{base}/sdk?%73dk=custom&a=%2B;b&flag&&ver%73ion+=1&protocol=2&r=k%20r&%zz=1"),
+    )
+    .await;
+    assert_eq!(
+        target,
+        format!("/sdk?a=%2B;b&flag&ver%73ion+=1&r=k%20r&%zz=1&{IDENTITY}")
+    );
+}
+
+#[tokio::test]
 async fn upgrade_url_without_a_path_gets_the_identity_on_the_root() {
     let gateway = FakeGateway::start().await;
     let base = gateway.url().trim_end_matches("/sdk").to_owned();

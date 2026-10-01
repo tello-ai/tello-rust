@@ -35,7 +35,9 @@ wss://api.telloai.io/sdk?sdk=js&version=0.1.1&protocol=1.0
 | `protocol` | SDK 의 `PROTOCOL_VERSION` | `1.0` |
 
 - 전부 선택 항목이며 진단 로그(`sdk.connection.established` · `sdk.connection.rejected` · `sdk.command.create_call` 의 `client` 필드)에만 쓴다. **연결 거절이나 동작 분기에 쓰지 않는다.**
-- trim 후 `^[A-Za-z0-9._+-]{1,32}$` 에 맞지 않거나 없으면 무시하고 `"unknown"` 으로 기록한다.
+- 값은 URL 인코딩해서 보낸다. 서버는 form 디코딩(`URLSearchParams`)한 뒤 trim 하므로, 인코딩하지 않은 `+` 는 공백이 된다(`+` 는 `%2B`).
+- 디코딩·trim 후 `^[A-Za-z0-9._+-]{1,32}$` 에 맞지 않거나 없으면 무시하고 `"unknown"` 으로 기록한다.
+- 공식 SDK 는 사용자 URL 의 경로와 다른 쿼리 쌍을 **원문 그대로** 두고, 같은 키(`sdk`·`version`·`protocol`)만 지운 뒤 자기 값을 덧붙인다.
 - API 키는 URL 에 싣지 않는다. 인증은 §2 의 `auth` 프레임으로만 한다.
 
 ## 2. 인증 (애플리케이션 핸드셰이크)
