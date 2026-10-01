@@ -94,3 +94,44 @@ async fn a_server_close_ends_the_connection_even_if_the_server_keeps_tcp_open() 
         .expect("no call was active");
     drop(conn);
 }
+
+/// Connects with `url` and returns the request target the gateway received.
+async fn upgrade_target(gateway: &FakeGateway, url: String) -> String {
+    let config = gateway.config().with_url(url);
+    let (client, conn) = tokio::join!(Client::connect(config), gateway.accept_authed());
+    client.expect("connect");
+    conn.upgrade.uri
+}
+
+const IDENTITY: &str = concat!(
+    "sdk=rust&version=",
+    env!("CARGO_PKG_VERSION"),
+    "&protocol=1.0"
+);
+
+#[tokio::test]
+async fn upgrade_url_names_the_sdk_version_and_protocol() {
+    let gateway = FakeGateway::start().await;
+    let target = upgrade_target(&gateway, gateway.url().to_owned()).await;
+    assert_eq!(target, format!("/sdk?{IDENTITY}"));
+}
+
+#[tokio::test]
+async fn upgrade_url_keeps_the_path_and_other_query_and_overrides_identity_keys() {
+    let gateway = FakeGateway::start().await;
+    let base = gateway.url().trim_end_matches("/sdk").to_owned();
+    let target = upgrade_target(
+        &gateway,
+        format!("{base}/edge/sdk?region=kr&sdk=custom&version=9&x=1"),
+    )
+    .await;
+    assert_eq!(target, format!("/edge/sdk?region=kr&x=1&{IDENTITY}"));
+}
+
+#[tokio::test]
+async fn upgrade_url_without_a_path_gets_the_identity_on_the_root() {
+    let gateway = FakeGateway::start().await;
+    let base = gateway.url().trim_end_matches("/sdk").to_owned();
+    let target = upgrade_target(&gateway, base).await;
+    assert_eq!(target, format!("/?{IDENTITY}"));
+}

@@ -20,6 +20,24 @@ ws(s)://<host>:<port>/sdk
 - 기본 포트 3000. WebSocket 서브프로토콜 협상 없음.
 - 한 연결당 활성 통화는 하나다.
 
+### 1.1 클라이언트 식별 쿼리 (선택)
+
+업그레이드 URL 에 클라이언트가 자신을 밝히는 쿼리 3개를 붙일 수 있다.
+
+```text
+wss://api.telloai.io/sdk?sdk=js&version=0.1.1&protocol=1.0
+```
+
+| 쿼리 | 뜻 | 공식 SDK 값 |
+| --- | --- | --- |
+| `sdk` | SDK 식별자 | `js` · `python` · `go` · `java` · `rust` |
+| `version` | SDK 패키지 배포 버전 (`v` 접두사 없음) | 예: `0.1.1` |
+| `protocol` | SDK 의 `PROTOCOL_VERSION` | `1.0` |
+
+- 전부 선택 항목이며 진단 로그(`sdk.connection.established` · `sdk.connection.rejected` · `sdk.command.create_call` 의 `client` 필드)에만 쓴다. **연결 거절이나 동작 분기에 쓰지 않는다.**
+- trim 후 `^[A-Za-z0-9._+-]{1,32}$` 에 맞지 않거나 없으면 무시하고 `"unknown"` 으로 기록한다.
+- API 키는 URL 에 싣지 않는다. 인증은 §2 의 `auth` 프레임으로만 한다.
+
 ## 2. 인증 (애플리케이션 핸드셰이크)
 
 인증은 HTTP upgrade 헤더나 쿼리 토큰이 아니라 **애플리케이션 프레임**으로 이뤄진다.
