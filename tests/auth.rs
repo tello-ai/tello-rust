@@ -29,7 +29,11 @@ async fn first_frame_is_auth_and_the_upgrade_carries_no_credentials() {
         first,
         json!({ "event": "auth", "data": { "token": API_KEY } })
     );
-    assert_eq!(conn.upgrade.uri, "/sdk", "no query string on the upgrade");
+    assert!(
+        !conn.upgrade.uri.contains(API_KEY),
+        "key leaked in the upgrade URI: {}",
+        conn.upgrade.uri
+    );
     assert!(conn.upgrade.headers.get("authorization").is_none());
     for (name, value) in &conn.upgrade.headers {
         let value = String::from_utf8_lossy(value.as_bytes());

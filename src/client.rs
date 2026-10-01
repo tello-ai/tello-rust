@@ -544,7 +544,8 @@ async fn read_loop(mut reader: Reader, shared: Arc<Shared>, close_timeout: Durat
 
 async fn open(config: &Config) -> Result<Socket, Error> {
     let transport = |error| Error::Transport(TransportError::websocket(error));
-    let request = config.url().into_client_request().map_err(transport)?;
+    let mut request = config.url().into_client_request().map_err(transport)?;
+    *request.uri_mut() = with_identity(request.uri()).map_err(transport)?;
     let connector = if request.uri().scheme_str() == Some("wss") {
         Connector::Rustls(tls_config()?)
     } else {
@@ -557,6 +558,45 @@ async fn open(config: &Config) -> Result<Socket, Error> {
         Ok(Err(error)) => Err(transport(error)),
         Err(_) => Err(Error::Transport(TransportError::open_timeout())),
     }
+}
+
+/// Query keys naming this client on the upgrade URL; the gateway logs them.
+const IDENTITY_KEYS: [&str; 3] = ["sdk", "version", "protocol"];
+
+/// `uri` with `sdk`, `version` and `protocol` set to this crate's identity.
+/// The path and every other query pair are kept; earlier identity pairs go.
+fn with_identity(
+    uri: &tokio_tungstenite::tungstenite::http::Uri,
+) -> Result<tokio_tungstenite::tungstenite::http::Uri, tokio_tungstenite::tungstenite::Error> {
+    let kept = uri
+        .query()
+        .into_iter()
+        .flat_map(|query| query.split('&'))
+        .filter(|pair| {
+            let key = pair.split('=').next().unwrap_or_default();
+            !pair.is_empty() && !IDENTITY_KEYS.contains(&key)
+        });
+    let identity = format!(
+        "sdk=rust&version={}&protocol={}",
+        env!("CARGO_PKG_VERSION"),
+        crate::PROTOCOL_VERSION
+    );
+    let query = kept
+        .chain(std::iter::once(identity.as_str()))
+        .collect::<Vec<_>>()
+        .join("&");
+    let path = match uri.path() {
+        "" => "/",
+        path => path,
+    };
+    let mut parts = uri.clone().into_parts();
+    parts.path_and_query = Some(
+        format!("{path}?{query}")
+            .parse()
+            .map_err(tokio_tungstenite::tungstenite::http::Error::from)?,
+    );
+    tokio_tungstenite::tungstenite::http::Uri::from_parts(parts)
+        .map_err(|error| tokio_tungstenite::tungstenite::http::Error::from(error).into())
 }
 
 /// rustls with the ring provider and the webpki root set, so `wss://` works

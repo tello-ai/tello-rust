@@ -32,7 +32,10 @@ OpenSSL is needed. Built and tested with stable Rust 1.94, edition 2021.
 `Config::new("")` and `Config::from_env()` read `TELLO_API_KEY`. The URL is
 `TELLO_URL` when set, otherwise `ws://localhost:3000/sdk`; `with_url` overrides
 both. The open timeout is 10s and the close timeout 5s
-(`with_open_timeout`, `with_close_timeout`).
+(`with_open_timeout`, `with_close_timeout`). The upgrade request adds
+`sdk=rust&version=<crate version>&protocol=<PROTOCOL_VERSION>` to the URL's
+query (other query pairs and the path are kept) so the gateway can log which
+client connected; the server never rejects on these values.
 
 `Client::connect` authenticates the API key internally: after the socket opens
 it sends an `auth` frame (`{"event":"auth","data":{"token":"<apiKey>"}}`) and
