@@ -37,3 +37,9 @@ tello-java.
 - The read task never waits for the event consumer, so heartbeat pings are
   always answered.
 - `wss://` via rustls with the ring provider and webpki roots; no OpenSSL.
+- The WebSocket upgrade URL carries `sdk=rust`, `version=<crate version>` and
+  `protocol=<PROTOCOL_VERSION>` so the gateway can log which client
+  connected; values are percent-encoded (`+` as `%2B`). The URL's path and
+  other query pairs are kept verbatim; pairs whose form-decoded key is one of
+  those three are replaced. The server never rejects a connection over these
+  values, and the API key never goes on the URL.

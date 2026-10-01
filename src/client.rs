@@ -564,7 +564,8 @@ async fn open(config: &Config) -> Result<Socket, Error> {
 const IDENTITY_KEYS: [&str; 3] = ["sdk", "version", "protocol"];
 
 /// `uri` with `sdk`, `version` and `protocol` set to this crate's identity.
-/// The path and every other query pair are kept; earlier identity pairs go.
+/// The path and every other query pair are kept byte for byte; empty pairs
+/// and pairs whose form-decoded key is an identity key go.
 fn with_identity(
     uri: &tokio_tungstenite::tungstenite::http::Uri,
 ) -> Result<tokio_tungstenite::tungstenite::http::Uri, tokio_tungstenite::tungstenite::Error> {
@@ -573,13 +574,13 @@ fn with_identity(
         .into_iter()
         .flat_map(|query| query.split('&'))
         .filter(|pair| {
-            let key = pair.split('=').next().unwrap_or_default();
-            !pair.is_empty() && !IDENTITY_KEYS.contains(&key)
+            let key = form_decode(pair.split('=').next().unwrap_or_default());
+            !pair.is_empty() && !IDENTITY_KEYS.contains(&key.as_str())
         });
     let identity = format!(
         "sdk=rust&version={}&protocol={}",
-        env!("CARGO_PKG_VERSION"),
-        crate::PROTOCOL_VERSION
+        encode_query_value(env!("CARGO_PKG_VERSION")),
+        encode_query_value(crate::PROTOCOL_VERSION)
     );
     let query = kept
         .chain(std::iter::once(identity.as_str()))
@@ -597,6 +598,49 @@ fn with_identity(
     );
     tokio_tungstenite::tungstenite::http::Uri::from_parts(parts)
         .map_err(|error| tokio_tungstenite::tungstenite::http::Error::from(error).into())
+}
+
+/// Decodes `raw` as a form-urlencoded component (`+` is a space, `%XX` a
+/// byte), the way the gateway reads query keys. A malformed escape or a
+/// non-UTF-8 result yields `raw` unchanged.
+fn form_decode(raw: &str) -> String {
+    let bytes = raw.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        match bytes[i] {
+            b'+' => out.push(b' '),
+            b'%' => {
+                let hex = bytes
+                    .get(i + 1..i + 3)
+                    .filter(|hex| hex.iter().all(u8::is_ascii_hexdigit))
+                    .and_then(|hex| std::str::from_utf8(hex).ok())
+                    .and_then(|hex| u8::from_str_radix(hex, 16).ok());
+                match hex {
+                    Some(byte) => out.push(byte),
+                    None => return raw.to_owned(),
+                }
+                i += 2;
+            }
+            byte => out.push(byte),
+        }
+        i += 1;
+    }
+    String::from_utf8(out).unwrap_or_else(|_| raw.to_owned())
+}
+
+/// Percent-encodes everything but RFC 3986 unreserved characters, so a `+`
+/// (semver build metadata) is not read back as a space.
+fn encode_query_value(value: &str) -> String {
+    let mut out = String::with_capacity(value.len());
+    for byte in value.bytes() {
+        if byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'.' | b'_' | b'~') {
+            out.push(char::from(byte));
+        } else {
+            out.push_str(&format!("%{byte:02X}"));
+        }
+    }
+    out
 }
 
 /// rustls with the ring provider and the webpki root set, so `wss://` works
@@ -679,5 +723,20 @@ mod tests {
         let config = Config::resolve(String::new(), |_| None);
         let error = Client::connect(config).await.expect_err("no key");
         assert!(matches!(error, Error::Config(_)), "got {error:?}");
+    }
+
+    #[test]
+    fn identity_values_are_percent_encoded() {
+        assert_eq!(encode_query_value("0.1.0+build.1"), "0.1.0%2Bbuild.1");
+        assert_eq!(encode_query_value("1.0-rc.1_x~"), "1.0-rc.1_x~");
+        assert_eq!(encode_query_value("a b&c=d"), "a%20b%26c%3Dd");
+    }
+
+    #[test]
+    fn query_keys_are_form_decoded_falling_back_to_the_raw_key() {
+        assert_eq!(form_decode("%73dk"), "sdk");
+        assert_eq!(form_decode("a+b%2B"), "a b+");
+        assert_eq!(form_decode("%zz"), "%zz");
+        assert_eq!(form_decode("%FF"), "%FF");
     }
 }
