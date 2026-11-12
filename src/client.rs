@@ -547,7 +547,8 @@ async fn open(config: &Config) -> Result<Socket, Error> {
     let mut request = config.url().into_client_request().map_err(transport)?;
     *request.uri_mut() = with_identity(request.uri()).map_err(transport)?;
     let connector = if request.uri().scheme_str() == Some("wss") {
-        Connector::Rustls(tls_config()?)
+        let tls = tls_config().map_err(|error| Error::Transport(TransportError::tls(error)))?;
+        Connector::Rustls(Arc::new(tls))
     } else {
         Connector::Plain
     };
@@ -643,19 +644,17 @@ fn encode_query_value(value: &str) -> String {
     out
 }
 
-/// rustls with the ring provider and the webpki root set, so `wss://` works
-/// without OpenSSL or a process-wide default provider.
-fn tls_config() -> Result<Arc<rustls::ClientConfig>, Error> {
+/// rustls with the ring provider and the webpki root set, so `wss://` and the
+/// REST API work without OpenSSL or a process-wide default provider.
+pub(crate) fn tls_config() -> Result<rustls::ClientConfig, rustls::Error> {
     let roots = rustls::RootCertStore {
         roots: webpki_roots::TLS_SERVER_ROOTS.to_vec(),
     };
     let provider = Arc::new(rustls::crypto::ring::default_provider());
-    let config = rustls::ClientConfig::builder_with_provider(provider)
-        .with_safe_default_protocol_versions()
-        .map_err(|error| Error::Transport(TransportError::tls(error)))?
+    Ok(rustls::ClientConfig::builder_with_provider(provider)
+        .with_safe_default_protocol_versions()?
         .with_root_certificates(roots)
-        .with_no_client_auth();
-    Ok(Arc::new(config))
+        .with_no_client_auth())
 }
 
 /// Sends the `auth` frame and waits for the reply. The key only ever goes into

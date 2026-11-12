@@ -1,11 +1,14 @@
 use std::fmt;
 use std::sync::Arc;
 
+use serde_json::Value;
+
 /// Every failure the SDK reports.
 ///
 /// Gateway error frames map onto the first eight variants by `code`, as
-/// declared in `docs/errors/errors.v1.json`. Branch on [`Error::code`], never on
-/// the message: the message is display text the gateway may reword.
+/// declared in `docs/errors/errors.v1.json`. REST API failures are
+/// [`Error::Api`] and [`Error::ApiConnection`]. Branch on [`Error::code`],
+/// never on the message: the message is display text the server may reword.
 #[derive(Debug, Clone, thiserror::Error)]
 #[non_exhaustive]
 pub enum Error {
@@ -77,15 +80,33 @@ pub enum Error {
     Transport(TransportError),
 
     /// The configuration cannot be used, e.g. no API key was given and
-    /// `TELLO_API_KEY` is unset.
+    /// `TELLO_API_KEY` is unset, or the REST API URL is not `https` (or
+    /// `http` on a loopback host).
     #[error("invalid configuration: {0}")]
     Config(String),
+
+    /// The REST API answered with an error, or with a response this SDK
+    /// cannot use (`code` `invalid_response`). See [`ApiError`].
+    #[error("{0}")]
+    Api(Box<ApiError>),
+
+    /// A REST request got no usable answer: DNS, TCP, TLS, a dropped
+    /// connection or the request timeout. See [`ApiConnectionError`].
+    #[error("{0}")]
+    ApiConnection(ApiConnectionError),
+
+    /// A REST call was given an argument it refuses before sending anything:
+    /// an empty id or an invalid idempotency key.
+    #[error("invalid argument: {0}")]
+    InvalidArgument(String),
 }
 
 impl Error {
-    /// The gateway error code. `None` for errors raised by the SDK itself:
-    /// [`Error::ConnectionClosed`], [`Error::SessionReplaced`],
-    /// [`Error::Transport`] and [`Error::Config`].
+    /// The server error code: the gateway frame code, or the REST API's
+    /// `error` in its original snake_case. `None` for errors raised by the SDK
+    /// itself: [`Error::ConnectionClosed`], [`Error::SessionReplaced`],
+    /// [`Error::Transport`], [`Error::Config`], [`Error::ApiConnection`] and
+    /// [`Error::InvalidArgument`].
     pub fn code(&self) -> Option<&str> {
         match self {
             Error::Authentication { .. } => Some(UNAUTHENTICATED),
@@ -96,10 +117,13 @@ impl Error {
             | Error::CallRefused { code, .. }
             | Error::CallProvider { code, .. }
             | Error::Server { code, .. } => Some(code),
+            Error::Api(error) => Some(&error.code),
             Error::ConnectionClosed { .. }
             | Error::SessionReplaced { .. }
             | Error::Transport(_)
-            | Error::Config(_) => None,
+            | Error::Config(_)
+            | Error::ApiConnection(_)
+            | Error::InvalidArgument(_) => None,
         }
     }
 
@@ -208,5 +232,95 @@ impl std::error::Error for TransportError {
             TransportKind::Tls(error) => Some(error),
             TransportKind::OpenTimeout => None,
         }
+    }
+}
+
+/// An error answer of the REST API, or a response the SDK could not use.
+///
+/// Branch on `status` and `code`; `message` is display text. A non-JSON or
+/// envelope-less error (e.g. a proxy page) has `code` `http_<status>`. A
+/// success status other than the documented one, or a body that is not a
+/// JSON object, has `code` `invalid_response`.
+#[derive(Debug, Clone, PartialEq)]
+#[non_exhaustive]
+pub struct ApiError {
+    /// The HTTP status.
+    pub status: u16,
+    /// The envelope's `error` as sent (snake_case, e.g. `tool_not_found`),
+    /// `http_<status>` or `invalid_response`.
+    pub code: String,
+    /// Display text.
+    pub message: String,
+    /// The envelope's `data`, e.g. `{"id": …}` of
+    /// `crew_generation_in_progress`; `None` when absent or `null`.
+    pub data: Option<Value>,
+    /// The `Idempotency-Key` the request carried. Retry with the same key.
+    pub idempotency_key: Option<String>,
+}
+
+impl fmt::Display for ApiError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{} ({}, HTTP {})", self.message, self.code, self.status)
+    }
+}
+
+impl std::error::Error for ApiError {}
+
+/// A REST request that got no usable answer: DNS, TCP, TLS, a dropped
+/// connection, or the request timeout. Its
+/// [`source`](std::error::Error::source) is the HTTP client's error.
+///
+/// A write (create, update, delete, crew generation, call draft) that fails
+/// this way may still have been applied, and `call_drafts().confirm` may
+/// have placed the call. Check with get or list before sending it again, and
+/// resend with the same [`idempotency_key`](Self::idempotency_key) where the
+/// request takes one.
+#[derive(Clone)]
+pub struct ApiConnectionError {
+    source: Arc<reqwest::Error>,
+    idempotency_key: Option<String>,
+}
+
+impl ApiConnectionError {
+    pub(crate) fn new(source: reqwest::Error, idempotency_key: Option<String>) -> Self {
+        Self {
+            source: Arc::new(source),
+            idempotency_key,
+        }
+    }
+
+    /// The `Idempotency-Key` the request carried.
+    pub fn idempotency_key(&self) -> Option<&str> {
+        self.idempotency_key.as_deref()
+    }
+
+    /// Whether the request timeout ran out.
+    pub fn is_timeout(&self) -> bool {
+        self.source.is_timeout()
+    }
+}
+
+impl fmt::Debug for ApiConnectionError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("ApiConnectionError")
+            .field("source", &self.source)
+            .field("idempotency_key", &self.idempotency_key)
+            .finish()
+    }
+}
+
+impl fmt::Display for ApiConnectionError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        if self.is_timeout() {
+            f.write_str("API request timed out")
+        } else {
+            write!(f, "API request failed: {}", self.source)
+        }
+    }
+}
+
+impl std::error::Error for ApiConnectionError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        Some(&*self.source)
     }
 }
