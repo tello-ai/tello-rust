@@ -1,5 +1,6 @@
 use std::fmt;
 use std::sync::Arc;
+use std::time::Duration;
 
 use serde_json::Value;
 
@@ -99,14 +100,20 @@ pub enum Error {
     /// an empty id or an invalid idempotency key.
     #[error("invalid argument: {0}")]
     InvalidArgument(String),
+
+    /// [`Crews::generate_and_wait`](crate::Crews::generate_and_wait) gave up
+    /// while job `id` was still `running`. The job keeps running: follow it
+    /// with [`Api::crew_generations`](crate::Api::crew_generations).
+    #[error("crew generation {id} still running after {timeout:?}")]
+    CrewGenerationTimeout { id: String, timeout: Duration },
 }
 
 impl Error {
     /// The server error code: the gateway frame code, or the REST API's
     /// `error` in its original snake_case. `None` for errors raised by the SDK
     /// itself: [`Error::ConnectionClosed`], [`Error::SessionReplaced`],
-    /// [`Error::Transport`], [`Error::Config`], [`Error::ApiConnection`] and
-    /// [`Error::InvalidArgument`].
+    /// [`Error::Transport`], [`Error::Config`], [`Error::ApiConnection`],
+    /// [`Error::InvalidArgument`] and [`Error::CrewGenerationTimeout`].
     pub fn code(&self) -> Option<&str> {
         match self {
             Error::Authentication { .. } => Some(UNAUTHENTICATED),
@@ -123,7 +130,8 @@ impl Error {
             | Error::Transport(_)
             | Error::Config(_)
             | Error::ApiConnection(_)
-            | Error::InvalidArgument(_) => None,
+            | Error::InvalidArgument(_)
+            | Error::CrewGenerationTimeout { .. } => None,
         }
     }
 

@@ -13,9 +13,11 @@ use crate::config::ENV_API_KEY;
 use crate::error::{ApiConnectionError, ApiError};
 use crate::Error;
 
+mod generation;
 mod targets;
 mod tools;
 
+pub use generation::{CrewGenerations, GenerateAndWait};
 pub use targets::{Agents, Crews};
 pub use tools::{ListTools, Tools};
 
@@ -34,6 +36,7 @@ const MAX_IDEMPOTENCY_KEY_BYTES: usize = 255;
 const OK: &[StatusCode] = &[StatusCode::OK];
 const CREATED: &[StatusCode] = &[StatusCode::CREATED];
 const NO_CONTENT: &[StatusCode] = &[StatusCode::NO_CONTENT];
+const ACCEPTED_OR_OK: &[StatusCode] = &[StatusCode::ACCEPTED, StatusCode::OK];
 
 /// Settings for [`Api::new`].
 ///
@@ -227,9 +230,14 @@ impl Api {
         Agents { api: self }
     }
 
-    /// Crews: list, get, create, update, delete.
+    /// Crews: list, get, create, update, delete, and generation from a goal.
     pub fn crews(&self) -> Crews<'_> {
         Crews { api: self }
+    }
+
+    /// Crew generation jobs started by [`Crews::generate`].
+    pub fn crew_generations(&self) -> CrewGenerations<'_> {
+        CrewGenerations { api: self }
     }
 
     async fn get_item(&self, collection: &str, id: &str) -> Result<Value, Error> {
@@ -263,10 +271,17 @@ impl Api {
     }
 
     async fn object(&self, request: Request<'_>) -> Result<Value, Error> {
+        self.object_with_status(request)
+            .await
+            .map(|(_, object)| object)
+    }
+
+    /// The JSON object of a documented success answer, with its status.
+    async fn object_with_status(&self, request: Request<'_>) -> Result<(StatusCode, Value), Error> {
         let key = request.idempotency_key;
         let (status, body) = self.send(request).await?;
         match serde_json::from_slice(&body) {
-            Ok(object @ Value::Object(_)) => Ok(object),
+            Ok(object @ Value::Object(_)) => Ok((status, object)),
             _ => Err(invalid_response(
                 status,
                 "the response body is not a JSON object",
@@ -392,6 +407,12 @@ impl<'a> Request<'a> {
 
     fn idempotency_key(mut self, key: Option<&'a str>) -> Self {
         self.idempotency_key = key;
+        self
+    }
+
+    /// Uses the long timeout: the server may take long to finish.
+    fn long(mut self) -> Self {
+        self.long = true;
         self
     }
 }
