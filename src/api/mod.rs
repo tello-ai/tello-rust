@@ -13,10 +13,12 @@ use crate::config::ENV_API_KEY;
 use crate::error::{ApiConnectionError, ApiError};
 use crate::Error;
 
+mod drafts;
 mod generation;
 mod targets;
 mod tools;
 
+pub use drafts::CallDrafts;
 pub use generation::{CrewGenerations, GenerateAndWait};
 pub use targets::{Agents, Crews};
 pub use tools::{ListTools, Tools};
@@ -238,6 +240,11 @@ impl Api {
     /// Crew generation jobs started by [`Crews::generate`].
     pub fn crew_generations(&self) -> CrewGenerations<'_> {
         CrewGenerations { api: self }
+    }
+
+    /// Call drafts: create, revise, confirm. Confirming places a real call.
+    pub fn call_drafts(&self) -> CallDrafts<'_> {
+        CallDrafts { api: self }
     }
 
     async fn get_item(&self, collection: &str, id: &str) -> Result<Value, Error> {

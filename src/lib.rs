@@ -42,7 +42,7 @@ mod error;
 mod event;
 
 pub use api::{
-    Agents, Api, ApiConfig, CrewGenerations, Crews, GenerateAndWait, ListTools, Tools,
+    Agents, Api, ApiConfig, CallDrafts, CrewGenerations, Crews, GenerateAndWait, ListTools, Tools,
     DEFAULT_API_URL, ENV_API_URL,
 };
 pub use client::{Client, Events};
