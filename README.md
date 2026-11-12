@@ -2,13 +2,14 @@
 
 # tello-rust
 
-Rust WebSocket SDK for the Tello `/sdk` protocol. The SDK is the "conversation
-brain": the gateway streams each caller turn from a live phone call, and your
-reply is forwarded back into the call.
+Rust SDK for Tello. `Client` speaks the `/sdk` WebSocket protocol and is the
+"conversation brain": the API gateway (api-gateway) streams each caller turn
+from a live phone call, and your reply is forwarded back into the call. `Api`
+is a separate client of the public REST API (`/v1`) that manages tools,
+agents and crews, generates crews from a goal, and drafts calls (see
+[§7](#7-rest-resource-api)).
 
 > repo: `tello-rust` · crate: `tello-ai-sdk` · library: `tello`
->
-> Transport is WebSocket only. There is no REST or webhook surface.
 
 ## 1. Install
 
@@ -24,8 +25,10 @@ to an unrelated project) and imported as `tello`:
 use tello::{Client, Config};
 ```
 
-It runs on Tokio. `wss://` uses rustls with the webpki root certificates, so no
-OpenSSL is needed. Built and tested with stable Rust 1.94, edition 2021.
+It runs on Tokio. `wss://` and the REST API use rustls with the ring crypto
+provider and the webpki root certificates, so no OpenSSL and no process-wide
+crypto provider is needed. Built and tested with stable Rust 1.94, edition
+2021.
 
 ## 2. API key
 
@@ -46,9 +49,15 @@ returns only once the server confirms with `auth.ok`. No `Authorization` header
 or query-string token is used. The key never appears in errors, and `Debug` for
 `Config` and `Client` prints it redacted. `connect` returns
 `Error::Authentication` if the gateway refuses the key, closes with code `4401`,
-or `auth.ok` does not arrive within the open timeout. No command can run before
-authentication completes, because you only get a `Client` from a successful
-`connect`.
+or `auth.ok` does not arrive within the open timeout. When the key has an
+allowed IP list that excludes this connection, the gateway answers
+`ipNotAllowed` (close `4401`, reason `ip_not_allowed`): the error's `code` is
+`ipNotAllowed` and `ip` the address it saw (`None` when it proved none);
+reconnecting from the same place gets the same answer. If the gateway could
+not check the key at all it answers `internalError` with close `1011`, which
+`connect` returns as `Error::Server`: the key was not refused, so reconnect
+later. No command can run before authentication completes, because you only
+get a `Client` from a successful `connect`.
 
 tungstenite, the WebSocket library underneath, logs raw frame payloads at the
 `trace` level. Keep `tungstenite=trace` logging off in production, or the auth
@@ -114,7 +123,7 @@ for every variant, and each payload struct also keeps it in its `raw` field.
 | `Event::CallNoAnswer(CallEnded)` | `call.noAnswer` | `status`, `failure_reason` |
 | `Event::CallFailed(CallEnded)` | `call.failed` | `status`, `failure_reason` |
 | `Event::CallSummary(CallSummary)` | `call.summary` | `request_id`, `call_id`, `status`, `duration_seconds`, `transcript`, `summary`, `credit_charged` |
-| `Event::Error(ErrorEvent)` | `error` | `code`, `message`, `request_id`, `question` |
+| `Event::Error(ErrorEvent)` | `error` | `code`, `message`, `request_id`, `question`, `required_scope`, `ip` |
 | `Event::Disconnected` | — | SDK-local; always the last event of a connection |
 | `Event::Unknown(Value)` | anything else | the raw frame; the event contract is additive |
 
@@ -186,6 +195,8 @@ by `code`:
 | gateway `code` | `Error` variant |
 | --- | --- |
 | `unauthenticated` | `Authentication` (auth handshake; also close code 4401 and the `auth.ok` timeout) |
+| `ipNotAllowed` | `Authentication` with `code` `ipNotAllowed` and `ip` (auth handshake, close 4401) |
+| `insufficientScope` | `PermissionDenied` with `required_scope`: the key lacks `calls:write` (`createCall`, `answer`, `sendDtmf`, `cancel`) or `calls:read` (`getSummary`). Only that command is refused; the connection stays open |
 | `toRequired` | `Validation` |
 | `callIdRequired` | `Validation` |
 | `callNotFound` | `Validation` |
@@ -195,7 +206,7 @@ by `code`:
 | `callAlreadyActive` | `CallAlreadyActive` |
 | `noActiveCall` | `NoActiveCall` |
 | `callRejected` | `CallRejected` (with `question`) |
-| `internalError` | `Server` |
+| `internalError` | `Server` (answering `auth` it comes with close 1011: reconnect later) |
 | any other code | `Server`, keeping the code |
 
 Every gateway-derived error exposes its code through `error.code()` — branch
@@ -264,7 +275,141 @@ misses a pong; the SDK's read task answers pings on its own, even while nobody
 reads `Events`. There is no reconnect/resume — treat an abnormal close as
 reconnect-worthy and restart the call.
 
-## 7. Examples
+## 7. REST resource API
+
+`tello::Api` is a client of the public REST API, separate from the WebSocket
+`Client`. It takes the same server API key and sends it as
+`Authorization: Bearer <key>`, with `Accept: application/json`,
+`User-Agent: tello-rust-sdk/<crate version>` and, when there is a body,
+`Content-Type: application/json`.
+
+```rust
+use std::time::Duration;
+
+use serde_json::json;
+use tello::{Api, ApiConfig, ListTools};
+
+#[tokio::main]
+async fn main() -> Result<(), tello::Error> {
+    // Reads TELLO_API_KEY, and TELLO_API_URL or https://api.telloai.io/v1.
+    let api = Api::from_env()?;
+    // Or explicitly:
+    let _api = Api::new(
+        ApiConfig::new("tello_live_xxx")
+            .with_api_url("https://api.telloai.io/v1")
+            .with_timeout(Duration::from_secs(10)),
+    )?;
+
+    let page = api.tools().list(ListTools::new().limit(20)).await?;
+    println!("{}", page["data"]);
+
+    let body = json!({"type": "endCall", "name": "hang up", "functionName": "hang_up"});
+    let tool = api.tools().create(&body, Some("tool-hang-up-1")).await?;
+    println!("created tool {}", tool["id"]);
+    Ok(())
+}
+```
+
+`ApiConfig::new(key)` uses `key`, or `TELLO_API_KEY` when it is `""`; a missing
+key makes `Api::new` fail with `Error::Config`. The base URL is
+`with_api_url`, else `TELLO_API_URL`, else `https://api.telloai.io/v1`; it
+must be `https` (`http` only for `127.0.0.1`, `localhost` and `::1`), and a
+trailing `/` is ignored. Reads (list, get) time out after 30s
+(`with_timeout`); every write (create, update, delete, crew generation, call
+drafts) after 120s (`with_long_timeout`). The key never appears in errors or
+`Debug`. `Api` is a cheap, cloneable handle.
+
+Bodies and results are JSON objects as `serde_json::Value`, so fields this
+version does not know are kept. Path ids are percent-encoded; an empty id is
+refused with `Error::InvalidArgument` before anything is sent.
+
+| method | HTTP | success | returns |
+| --- | --- | --- | --- |
+| `tools().list(ListTools::new().limit(n).cursor(c))` | `GET /tools?limit&cursor` | 200 | `{"data": [...], "nextCursor": …}` |
+| `tools().get(id)` | `GET /tools/{id}` | 200 | tool |
+| `tools().create(&body, key)` | `POST /tools` | 201 | tool, with `revision` |
+| `tools().update(id, &patch)` | `PATCH /tools/{id}` | 200 | tool |
+| `tools().delete(id)` | `DELETE /tools/{id}` | 204 | `()` |
+| `agents().list()` / `crews().list()` | `GET /agents` / `GET /crews` | 200 | `{"data": [...]}` |
+| `agents()` / `crews()` `.get` `.create` `.update` `.delete` | `/agents[/{id}]` / `/crews[/{id}]` | 200 / 201 / 200 / 204 | agent or crew / `()` |
+| `crews().generate(&input, key)` | `POST /crews/generate` | 202 (200 for the job of the same goal) | job `{"id", "status": "running", …}` |
+| `crews().generate_and_wait(&input, GenerateAndWait::new())` | generate, then `GET /crew-generations/{id}` | | the finished job |
+| `crew_generations().get(id)` | `GET /crew-generations/{id}` | 200 | job |
+| `call_drafts().create(&body, key)` | `POST /call-drafts` | 201 | draft |
+| `call_drafts().revise(draft_id, request, key)` | `POST /call-drafts/{id}/revise` with `{"request": …}` | 200 | a draft with a **new id** |
+| `call_drafts().confirm(draft_id, key)` | `POST /call-drafts/{id}/confirm`, no body | 201 | the call |
+
+`key` is an optional `Idempotency-Key` (`Option<&str>`), sent only when given:
+resending the same request with the same key replays the first answer. A key
+must be 1 to 255 printable ASCII characters without a comma, or the call fails
+with `Error::InvalidArgument` and nothing is sent. `confirm` always sends one:
+with `None` it generates a UUID v4.
+
+A success status other than the one in the table, or a body that is not a
+JSON object, is an `invalid_response` error. Every draft status
+(`pendingConfirmation`, `needsClarification`, `refused`, `confirmed`) is a
+success: branch on `status`.
+
+`generate_and_wait` polls the job every 2s (`poll_interval`) until it is no
+longer `running` and returns it; a `failed` job is returned, not raised. After
+600s (`timeout`) it fails with `Error::CrewGenerationTimeout { id, .. }`; the
+job keeps running on the server.
+
+> **Writes go live at once.** Creating, updating or deleting a tool, agent or
+> crew saves, deploys and publishes it in one request; the next call uses it.
+> **`call_drafts().confirm` places a real, billed phone call**, and so does
+> `call_drafts().create` when the agent has a ready scenario (status
+> `confirmed`). Try them only against controlled test numbers.
+
+The SDK never retries. An error answer is `Error::Api(ApiError)` with
+`status` (HTTP), `code` (the server's `error` as sent, snake_case, e.g.
+`tool_not_found`), `message` (display text), `data` (the envelope's `data`,
+or `None`) and `idempotency_key` (the key sent, or `None`). An answer without
+an error envelope, e.g. a proxy page, has `code` `http_<status>`. No usable
+answer at all (DNS, TCP, TLS, dropped connection, timeout) is
+`Error::ApiConnection`, which also carries `idempotency_key()`: **a write that
+fails this way may still have been applied**, so check with get or list
+before sending it again, with the same key.
+
+```rust
+async fn confirm(api: &tello::Api, draft_id: &str) -> Result<(), tello::Error> {
+    match api.call_drafts().confirm(draft_id, None).await {
+        Ok(call) => println!("calling: {}", call["id"]),
+        Err(tello::Error::Api(error)) if error.code == "draft_not_found" => {
+            eprintln!("no such draft: {}", error.message);
+        }
+        Err(tello::Error::Api(error)) => {
+            eprintln!("{} {}: {:?}", error.status, error.code, error.data);
+        }
+        Err(tello::Error::ApiConnection(error)) => {
+            // The call may have been placed: resend with this generated key,
+            // never a new one.
+            let key = error.idempotency_key().unwrap_or_default().to_owned();
+            api.call_drafts().confirm(draft_id, Some(&key)).await?;
+        }
+        Err(other) => return Err(other),
+    }
+    Ok(())
+}
+```
+
+Some codes (the REST errors page of the Tello developer docs lists them all):
+
+| status | `code` | what to do |
+| --- | --- | --- |
+| 401 | `unauthenticated` | check the API key |
+| 403 | `insufficient_scope` | give the key the scope in `data.requiredScope` |
+| 403 | `ip_not_allowed` | the request came from outside the key's allowed IPs (`data.ip`) |
+| 400 | `invalid_request` / `invalid_tool` / `invalid_agent` / `invalid_crew` | fix the body; see `data.detail` |
+| 404 | `tool_not_found` / `agent_not_found` / `crew_not_found` | use an id of this account |
+| 422 | `tool_not_publishable` / `agent_not_publishable` / `crew_not_publishable` | nothing was saved; see `data.reason` |
+| 409 | `crew_generation_in_progress` | another goal is being built; `data.id` is its job |
+| 404 / 409 / 410 | `draft_not_found` / `draft_superseded` / `draft_expired` | use the newest draft, or start over |
+| 409 | `idempotency_in_progress` | the same key is still running; check again later with the same key |
+| 502 | `write_outcome_unknown` | the write may have been applied: check before creating again with a new key |
+| 503 | `upstream_unavailable` | not applied; resend later |
+
+## 8. Examples
 
 ```bash
 TELLO_API_KEY=tello_live_xxx TELLO_URL=ws://localhost:3000/sdk \
@@ -276,12 +421,12 @@ It places a real call. Replace the placeholder recipient `+821012345678` in
 number first. Keep live credentials in `examples/.env`, which is git-ignored and
 not packaged.
 
-## 8. Version compatibility
+## 9. Version compatibility
 
 `tello-ai-sdk 0.1.x` implements Tello WS protocol `1.0` (`tello::PROTOCOL_VERSION`).
 
 The full frame contract is in [`docs/protocol/sdk-ws.v1.md`](docs/protocol/sdk-ws.v1.md),
 with [`docs/events/sdk-events.v1.schema.json`](docs/events/sdk-events.v1.schema.json)
 and [`docs/errors/errors.v1.json`](docs/errors/errors.v1.json). Those three files
-are generated copies of the canonical contract that lives beside the gateway
-implementation — read them here, edit them there.
+are generated copies of the canonical contract that lives beside the API
+gateway (api-gateway) implementation — read them here, edit them there.

@@ -2,7 +2,7 @@
 name = "tello-ai-sdk"
 version = "0.1.0"
 edition = "2021"
-description = "Rust WebSocket SDK for the Tello /sdk protocol: place a phone call and answer each caller turn."
+description = "Rust SDK for Tello: the /sdk WebSocket protocol (place a phone call and answer each caller turn) and the public REST API (tools, agents, crews, call drafts)."
 license = "Apache-2.0"
 repository = "https://github.com/tello-ai/tello-rust"
 homepage = "https://telloai.io"
