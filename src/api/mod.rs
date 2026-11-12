@@ -13,8 +13,10 @@ use crate::config::ENV_API_KEY;
 use crate::error::{ApiConnectionError, ApiError};
 use crate::Error;
 
+mod targets;
 mod tools;
 
+pub use targets::{Agents, Crews};
 pub use tools::{ListTools, Tools};
 
 /// REST API base URL used when neither [`ApiConfig::with_api_url`] nor
@@ -220,6 +222,46 @@ impl Api {
         Tools { api: self }
     }
 
+    /// Agents: list, get, create, update, delete.
+    pub fn agents(&self) -> Agents<'_> {
+        Agents { api: self }
+    }
+
+    /// Crews: list, get, create, update, delete.
+    pub fn crews(&self) -> Crews<'_> {
+        Crews { api: self }
+    }
+
+    async fn get_item(&self, collection: &str, id: &str) -> Result<Value, Error> {
+        self.object(Request::new(Method::GET, &[collection, id], OK))
+            .await
+    }
+
+    async fn create_item(
+        &self,
+        collection: &str,
+        body: &Value,
+        idempotency_key: Option<&str>,
+    ) -> Result<Value, Error> {
+        self.object(
+            Request::new(Method::POST, &[collection], CREATED)
+                .body(body)
+                .idempotency_key(idempotency_key),
+        )
+        .await
+    }
+
+    async fn update_item(&self, collection: &str, id: &str, patch: &Value) -> Result<Value, Error> {
+        self.object(Request::new(Method::PATCH, &[collection, id], OK).body(patch))
+            .await
+    }
+
+    async fn delete_item(&self, collection: &str, id: &str) -> Result<(), Error> {
+        self.send(Request::new(Method::DELETE, &[collection, id], NO_CONTENT))
+            .await
+            .map(drop)
+    }
+
     async fn object(&self, request: Request<'_>) -> Result<Value, Error> {
         let key = request.idempotency_key;
         let (status, body) = self.send(request).await?;
@@ -231,10 +273,6 @@ impl Api {
                 key,
             )),
         }
-    }
-
-    async fn empty(&self, request: Request<'_>) -> Result<(), Error> {
-        self.send(request).await.map(drop)
     }
 
     /// Sends `request` and returns the status and body of a documented

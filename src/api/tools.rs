@@ -1,8 +1,10 @@
 use reqwest::Method;
 use serde_json::Value;
 
-use super::{Api, Request, CREATED, NO_CONTENT, OK};
+use super::{Api, Request, OK};
 use crate::Error;
+
+const TOOLS: &str = "tools";
 
 /// Tools: `/v1/tools`. Get one with [`Api::tools`].
 ///
@@ -55,41 +57,29 @@ impl Tools<'_> {
             pairs.push(("cursor", cursor));
         }
         self.api
-            .object(Request::new(Method::GET, &["tools"], OK).query(pairs))
+            .object(Request::new(Method::GET, &[TOOLS], OK).query(pairs))
             .await
     }
 
     /// `GET /tools/{id}`: one tool with its full settings.
     pub async fn get(self, id: &str) -> Result<Value, Error> {
-        self.api
-            .object(Request::new(Method::GET, &["tools", id], OK))
-            .await
+        self.api.get_item(TOOLS, id).await
     }
 
     /// `POST /tools`: creates a tool from `body` (a JSON object) and returns
     /// it with its `revision`. With `idempotency_key`, resending the same body
     /// replays the first answer instead of creating another tool.
     pub async fn create(self, body: &Value, idempotency_key: Option<&str>) -> Result<Value, Error> {
-        self.api
-            .object(
-                Request::new(Method::POST, &["tools"], CREATED)
-                    .body(body)
-                    .idempotency_key(idempotency_key),
-            )
-            .await
+        self.api.create_item(TOOLS, body, idempotency_key).await
     }
 
     /// `PATCH /tools/{id}`: changes only the fields in `patch`.
     pub async fn update(self, id: &str, patch: &Value) -> Result<Value, Error> {
-        self.api
-            .object(Request::new(Method::PATCH, &["tools", id], OK).body(patch))
-            .await
+        self.api.update_item(TOOLS, id, patch).await
     }
 
     /// `DELETE /tools/{id}`; the API answers `204` without a body.
     pub async fn delete(self, id: &str) -> Result<(), Error> {
-        self.api
-            .empty(Request::new(Method::DELETE, &["tools", id], NO_CONTENT))
-            .await
+        self.api.delete_item(TOOLS, id).await
     }
 }

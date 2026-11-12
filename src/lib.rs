@@ -41,7 +41,7 @@ mod config;
 mod error;
 mod event;
 
-pub use api::{Api, ApiConfig, ListTools, Tools, DEFAULT_API_URL, ENV_API_URL};
+pub use api::{Agents, Api, ApiConfig, Crews, ListTools, Tools, DEFAULT_API_URL, ENV_API_URL};
 pub use client::{Client, Events};
 pub use command::{Answer, CreateCall, GetSummary, SendDtmf};
 pub use config::{Config, DEFAULT_URL, ENV_API_KEY, ENV_URL};
