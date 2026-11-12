@@ -4,20 +4,40 @@ use std::time::Duration;
 
 use serde_json::Value;
 
+use crate::event::ErrorEvent;
+
 /// Every failure the SDK reports.
 ///
-/// Gateway error frames map onto the first eight variants by `code`, as
+/// Gateway error frames map onto the first nine variants by `code`, as
 /// declared in `docs/errors/errors.v1.json`. REST API failures are
 /// [`Error::Api`] and [`Error::ApiConnection`]. Branch on [`Error::code`],
 /// never on the message: the message is display text the server may reword.
 #[derive(Debug, Clone, thiserror::Error)]
 #[non_exhaustive]
 pub enum Error {
-    /// The API key was refused: an `unauthenticated` error frame, close code
-    /// 4401, or no `auth.ok` within the open timeout. Its code is always
-    /// `unauthenticated`.
+    /// The API key was refused: an `unauthenticated` or `ipNotAllowed` error
+    /// frame, close code 4401, or no `auth.ok` within the open timeout. `code`
+    /// is `ipNotAllowed` when the key's allowed IP list excludes this
+    /// connection, with `ip` the address the gateway saw (`None` when it
+    /// proved none); otherwise `unauthenticated`. Reconnecting from the same
+    /// place gets the same answer.
     #[error("authentication failed: {message}")]
-    Authentication { message: String },
+    Authentication {
+        code: String,
+        message: String,
+        ip: Option<String>,
+    },
+
+    /// The API key lacks the scope a command needs (`insufficientScope`):
+    /// `createCall`, `answer`, `sendDtmf` and `cancel` need `calls:write`,
+    /// `getSummary` needs `calls:read`. `required_scope` names it. Only that
+    /// command is refused; the connection stays open.
+    #[error("{message} ({code})")]
+    PermissionDenied {
+        code: String,
+        message: String,
+        required_scope: Option<String>,
+    },
 
     /// A command was malformed or referred to a call that cannot be used:
     /// `toRequired`, `callIdRequired`, `callNotFound`, `callNotCompleted`,
@@ -116,7 +136,7 @@ impl Error {
     /// [`Error::InvalidArgument`] and [`Error::CrewGenerationTimeout`].
     pub fn code(&self) -> Option<&str> {
         match self {
-            Error::Authentication { .. } => Some(UNAUTHENTICATED),
+            Error::Authentication { code, .. } | Error::PermissionDenied { code, .. } => Some(code),
             Error::Validation { code, .. }
             | Error::CallAlreadyActive { code, .. }
             | Error::NoActiveCall { code, .. }
@@ -135,13 +155,22 @@ impl Error {
         }
     }
 
-    /// Maps a gateway error code to its typed error, as declared by the
-    /// `sdkException` of each code in `docs/errors/errors.v1.json`.
-    pub(crate) fn from_code(code: &str, message: &str, question: Option<&str>) -> Error {
-        let code_owned = code.to_owned();
-        let message = message.to_owned();
-        match code {
-            UNAUTHENTICATED => Error::Authentication { message },
+    /// Maps a gateway error frame to its typed error by `code`, as declared
+    /// by the `sdkException` of each code in `docs/errors/errors.v1.json`.
+    pub(crate) fn from_event(event: &ErrorEvent) -> Error {
+        let code_owned = event.code.clone();
+        let message = event.message.clone();
+        match event.code.as_str() {
+            UNAUTHENTICATED | IP_NOT_ALLOWED => Error::Authentication {
+                code: code_owned,
+                message,
+                ip: event.ip.clone(),
+            },
+            "insufficientScope" => Error::PermissionDenied {
+                code: code_owned,
+                message,
+                required_scope: event.required_scope.clone(),
+            },
             "toRequired" | "callIdRequired" | "callNotFound" | "callNotCompleted"
             | "dtmfDigitsRequired" | "dtmfDigitsInvalid" => Error::Validation {
                 code: code_owned,
@@ -158,7 +187,7 @@ impl Error {
             "callRejected" => Error::CallRejected {
                 code: code_owned,
                 message,
-                question: question.map(str::to_owned),
+                question: event.question.clone(),
             },
             "insufficientCredit"
             | "concurrentLimitExceeded"
@@ -187,9 +216,20 @@ impl Error {
             message: message.into(),
         }
     }
+
+    /// An [`Error::Authentication`] with code `unauthenticated`.
+    pub(crate) fn unauthenticated(message: impl Into<String>) -> Error {
+        Error::Authentication {
+            code: UNAUTHENTICATED.to_owned(),
+            message: message.into(),
+            ip: None,
+        }
+    }
 }
 
 pub(crate) const UNAUTHENTICATED: &str = "unauthenticated";
+pub(crate) const IP_NOT_ALLOWED: &str = "ipNotAllowed";
+pub(crate) const INTERNAL_ERROR: &str = "internalError";
 
 /// Why the WebSocket could not be opened. Its [`source`](std::error::Error::source)
 /// is the underlying WebSocket library error, when there is one.

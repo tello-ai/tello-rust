@@ -73,7 +73,7 @@ async fn unauthenticated_error_frame_fails_connect() {
 
     let error = result.expect_err("connect must fail");
     assert!(
-        matches!(&error, Error::Authentication { message } if message == "Authentication required"),
+        matches!(&error, Error::Authentication { message, ip: None, .. } if message == "Authentication required"),
         "got {error:?}"
     );
     assert_eq!(error.code(), Some("unauthenticated"));
@@ -120,4 +120,94 @@ async fn missing_auth_ok_fails_connect_after_the_open_timeout() {
         "got {error:?}"
     );
     assert_key_absent(&error);
+}
+
+#[tokio::test]
+async fn ip_not_allowed_error_frame_fails_connect_with_the_ip() {
+    for (ip, expected) in [
+        (json!("203.0.113.7"), Some("203.0.113.7")),
+        (json!(null), None),
+    ] {
+        let gateway = FakeGateway::start().await;
+
+        let server = async {
+            let mut conn = gateway.accept().await;
+            conn.recv_json().await;
+            conn.send_json(json!({
+                "type": "error", "version": "1.0", "code": "ipNotAllowed",
+                "message": "The request IP address is not in this server key's allowed IP list",
+                "ip": ip,
+            }))
+            .await;
+            conn.close_with(4401, "ip_not_allowed").await;
+        };
+        let (result, ()) = tokio::join!(Client::connect(gateway.config()), server);
+
+        let error = result.expect_err("connect must fail");
+        assert!(
+            matches!(&error, Error::Authentication { code, ip: got, .. }
+                if code == "ipNotAllowed" && got.as_deref() == expected),
+            "got {error:?}"
+        );
+        assert_eq!(error.code(), Some("ipNotAllowed"));
+        assert_key_absent(&error);
+    }
+}
+
+#[tokio::test]
+async fn close_4401_for_ip_not_allowed_fails_connect_with_its_code() {
+    let gateway = FakeGateway::start().await;
+
+    let server = async {
+        let mut conn = gateway.accept().await;
+        conn.recv_json().await;
+        conn.close_with(4401, "ip_not_allowed").await;
+    };
+    let (result, ()) = tokio::join!(Client::connect(gateway.config()), server);
+
+    let error = result.expect_err("connect must fail");
+    assert_eq!(error.code(), Some("ipNotAllowed"), "got {error:?}");
+    assert!(matches!(error, Error::Authentication { ip: None, .. }));
+}
+
+#[tokio::test]
+async fn internal_error_answering_auth_is_a_server_error() {
+    let gateway = FakeGateway::start().await;
+
+    let server = async {
+        let mut conn = gateway.accept().await;
+        conn.recv_json().await;
+        conn.send_json(json!({
+            "type": "error", "version": "1.0",
+            "code": "internalError", "message": "Internal error",
+        }))
+        .await;
+        conn.close_with(1011, "internal_error").await;
+    };
+    let (result, ()) = tokio::join!(Client::connect(gateway.config()), server);
+
+    let error = result.expect_err("connect must fail");
+    assert!(
+        matches!(&error, Error::Server { code, message } if code == "internalError" && message == "Internal error"),
+        "got {error:?}"
+    );
+    assert_key_absent(&error);
+}
+
+#[tokio::test]
+async fn close_1011_during_auth_is_a_server_error() {
+    let gateway = FakeGateway::start().await;
+
+    let server = async {
+        let mut conn = gateway.accept().await;
+        conn.recv_json().await;
+        conn.close_with(1011, "internal_error").await;
+    };
+    let (result, ()) = tokio::join!(Client::connect(gateway.config()), server);
+
+    let error = result.expect_err("connect must fail");
+    assert!(
+        matches!(&error, Error::Server { code, .. } if code == "internalError"),
+        "got {error:?}"
+    );
 }

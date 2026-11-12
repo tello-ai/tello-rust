@@ -219,6 +219,11 @@ pub struct ErrorEvent {
     pub request_id: Option<String>,
     /// Present for `callRejected`.
     pub question: Option<String>,
+    /// Present for `insufficientScope`: the scope the command needs.
+    pub required_scope: Option<String>,
+    /// Present for `ipNotAllowed`: the connection's address as the gateway
+    /// saw it.
+    pub ip: Option<String>,
     pub raw: Value,
 }
 
@@ -226,7 +231,7 @@ impl ErrorEvent {
     /// The typed error for this frame, mapped by `code` as declared in
     /// `docs/errors/errors.v1.json`. Unknown codes map to [`Error::Server`].
     pub fn to_error(&self) -> Error {
-        Error::from_code(&self.code, &self.message, self.question.as_deref())
+        Error::from_event(self)
     }
 }
 
@@ -316,6 +321,8 @@ pub(crate) fn parse(raw: Value) -> Event {
             message: text(&raw, "message"),
             request_id: optional_text(&raw, "requestId"),
             question: optional_text(&raw, "question"),
+            required_scope: optional_text(&raw, "requiredScope"),
+            ip: optional_text(&raw, "ip"),
             raw,
         }),
         _ => Event::Unknown(raw),
