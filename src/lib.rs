@@ -1,8 +1,9 @@
-//! Rust WebSocket SDK for the Tello `/sdk` protocol.
+//! Rust SDK for Tello: the `/sdk` WebSocket protocol and the public REST API.
 //!
-//! The gateway streams each callee turn of a live phone call to you, and your
-//! reply is spoken back into the call. The transport is one WebSocket; there
-//! is no REST or webhook surface.
+//! [`Client`] speaks the WebSocket protocol: the API gateway streams each
+//! callee turn of a live phone call to you, and your reply is spoken back
+//! into the call. [`Api`] is a separate client of the public REST API (`/v1`)
+//! for tools, agents, crews, crew generation and call drafts.
 //!
 //! ```no_run
 //! use tello::{Answer, Client, Config, CreateCall, Event};
@@ -32,18 +33,33 @@
 //! # }
 //! ```
 //!
-//! The wire contract ships with the crate under `docs/`.
+//! ```no_run
+//! # async fn run() -> Result<(), tello::Error> {
+//! // Reads TELLO_API_KEY, and TELLO_API_URL or https://api.telloai.io/v1.
+//! let api = tello::Api::from_env()?;
+//! let agents = api.agents().list().await?;
+//! println!("{}", agents["data"]);
+//! # Ok(())
+//! # }
+//! ```
+//!
+//! The WebSocket contract ships with the crate under `docs/`.
 
+mod api;
 mod client;
 mod command;
 mod config;
 mod error;
 mod event;
 
+pub use api::{
+    Agents, Api, ApiConfig, CallDrafts, CrewGenerations, Crews, GenerateAndWait, ListTools, Tools,
+    DEFAULT_API_URL, ENV_API_URL,
+};
 pub use client::{Client, Events};
 pub use command::{Answer, CreateCall, GetSummary, SendDtmf};
 pub use config::{Config, DEFAULT_URL, ENV_API_KEY, ENV_URL};
-pub use error::{Error, TransportError};
+pub use error::{ApiConnectionError, ApiError, Error, TransportError};
 pub use event::{
     AnswerAccepted, CallCreated, CallEnded, CallStatus, CallStatusChanged, CallSummary,
     DtmfAccepted, ErrorEvent, Event, Turn,

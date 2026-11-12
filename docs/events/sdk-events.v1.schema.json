@@ -2,7 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://telloai.io/schemas/sdk-events.v1.schema.json",
   "title": "Tello SDK WebSocket Events",
-  "description": "Inbound flat frames sent by turn-provider-gateway /sdk to SDK clients. Dispatch on `type`. All keys are camelCase. Source: turn-provider-gateway/src/infrastructure/ws/sdk-events.ts and sdk-protocol.ts. Canonical path: turn-provider-gateway/docs/events/sdk-events.v1.schema.json — copies inside SDK client repos are generated, edit the canonical file then copy outward.",
+  "description": "Inbound flat frames sent by api-gateway /sdk to SDK clients. Dispatch on `type`. All keys are camelCase. Source: api-gateway/src/infrastructure/ws/sdk-events.ts and sdk-protocol.ts. Canonical path: api-gateway/docs/events/sdk-events.v1.schema.json — copies inside SDK client repos are generated, edit the canonical file then copy outward.",
   "oneOf": [
     { "$ref": "#/$defs/authOk" },
     { "$ref": "#/$defs/callCreated" },
@@ -71,12 +71,13 @@
       "required": ["messageId", "digits"]
     },
     "callStatusChanged": {
-      "description": "Progress statuses are deduplicated against the last published status. A call already answered when Voice Gateway sees it skips straight to inProgress, so clients must not depend on dialing/ringing appearing. Cancellation also arrives here with status `cancelled`.",
+      "description": "Progress statuses are deduplicated against the last published status. A call already answered when Voice Gateway sees it skips straight to inProgress, so clients must not depend on dialing/ringing appearing. Cancellation also arrives here with status `cancelled` and endReason (null when unavailable).",
       "allOf": [{ "$ref": "#/$defs/base" }],
       "properties": {
         "type": { "const": "call.statusChanged" },
         "status": { "$ref": "#/$defs/status" },
-        "previousStatus": { "$ref": "#/$defs/status" }
+        "previousStatus": { "$ref": "#/$defs/status" },
+        "endReason": { "type": ["string", "null"] }
       },
       "required": ["status", "previousStatus"]
     },
@@ -100,10 +101,12 @@
       "required": ["turnIndex", "text"]
     },
     "callCompleted": {
+      "description": "Call termination, independent of transcript/summary readiness. endReason preserves the actual termination cause; null when unavailable.",
       "allOf": [{ "$ref": "#/$defs/base" }],
       "properties": {
         "type": { "const": "call.completed" },
-        "status": { "const": "completed" }
+        "status": { "const": "completed" },
+        "endReason": { "type": ["string", "null"] }
       },
       "required": ["status"]
     },
@@ -112,7 +115,8 @@
       "properties": {
         "type": { "const": "call.noAnswer" },
         "status": { "const": "noAnswer" },
-        "failureReason": { "type": "string" }
+        "failureReason": { "type": "string" },
+        "endReason": { "type": ["string", "null"] }
       },
       "required": ["status"]
     },
@@ -121,12 +125,13 @@
       "properties": {
         "type": { "const": "call.failed" },
         "status": { "const": "failed" },
-        "failureReason": { "type": "string" }
+        "failureReason": { "type": "string" },
+        "endReason": { "type": ["string", "null"] }
       },
       "required": ["status"]
     },
     "callSummary": {
-      "description": "Reply to getSummary. A command response rather than a call-stream event: it carries no sessionId and no timestamp.",
+      "description": "Reply to getSummary. A command response rather than a call-stream event: it carries no sessionId and no timestamp. endReason is the canonical stored call end_reason, or null. Transcript/summary may not yet be ready after the terminal event.",
       "type": "object",
       "required": ["type", "version", "callId", "status", "durationSeconds", "transcript", "summary", "creditCharged"],
       "properties": {
@@ -135,6 +140,7 @@
         "requestId": { "type": "string" },
         "callId": { "type": "string" },
         "status": { "$ref": "#/$defs/status" },
+        "endReason": { "type": ["string", "null"] },
         "durationSeconds": { "type": ["integer", "null"] },
         "transcript": { "type": ["string", "null"] },
         "summary": { "type": ["string", "null"] },
@@ -151,7 +157,9 @@
         "code": { "type": "string" },
         "message": { "type": "string" },
         "requestId": { "type": "string" },
-        "question": { "type": "string" }
+        "question": { "type": "string" },
+        "requiredScope": { "type": "string" },
+        "ip": { "type": ["string", "null"] }
       }
     }
   }

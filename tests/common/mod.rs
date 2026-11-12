@@ -1,4 +1,4 @@
-//! A scripted stand-in for the turn-provider-gateway `/sdk` endpoint.
+//! A scripted stand-in for the API gateway (api-gateway) `/sdk` endpoint.
 //!
 //! Every await that depends on the peer is bounded by [`WAIT`], so a broken
 //! client fails the test instead of hanging it.

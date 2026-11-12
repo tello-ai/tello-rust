@@ -2,13 +2,13 @@
 
 # tello-rust
 
-Tello `/sdk` 프로토콜용 Rust WebSocket SDK. SDK가 대화의 두뇌를 맡습니다.
-게이트웨이는 진행 중인 통화에서 상대방이 말한 턴을 실시간으로 넘겨주고,
-여러분이 만든 답변은 다시 통화로 전달됩니다.
+Tello용 Rust SDK. `Client`는 `/sdk` WebSocket 프로토콜로 대화의 두뇌를 맡습니다.
+API 게이트웨이(api-gateway)는 진행 중인 통화에서 상대방이 말한 턴을 실시간으로
+넘겨주고, 여러분이 만든 답변은 다시 통화로 전달됩니다. `Api`는 공개 REST
+API(`/v1`)용 별도 클라이언트로, 도구·에이전트·크루를 관리하고 목표로 크루를
+만들고 통화 초안을 다룹니다([§7](#7-rest-자원-api)).
 
 > 저장소: `tello-rust` · 크레이트: `tello-ai-sdk` · 라이브러리: `tello`
->
-> 전송 계층은 WebSocket뿐입니다. REST나 webhook은 제공하지 않습니다.
 
 ## 1. 설치
 
@@ -24,8 +24,9 @@ cargo add tokio --features macros,rt-multi-thread
 use tello::{Client, Config};
 ```
 
-Tokio 위에서 동작합니다. `wss://`는 rustls와 webpki 루트 인증서를 쓰므로
-OpenSSL이 필요 없습니다. stable Rust 1.94, edition 2021로 빌드·테스트했습니다.
+Tokio 위에서 동작합니다. `wss://`와 REST API는 ring 암호 공급자와 webpki 루트
+인증서를 쓰는 rustls로 동작하므로 OpenSSL도, 프로세스 전역 암호 공급자 설치도
+필요 없습니다. stable Rust 1.94, edition 2021로 빌드·테스트했습니다.
 
 ## 2. API 키
 
@@ -40,8 +41,14 @@ URL은 `TELLO_URL`이 있으면 그 값을, 없으면 `ws://localhost:3000/sdk`�
 않습니다. 키는 오류 메시지에 들어가지 않고, `Config`와 `Client`의 `Debug`
 출력에서도 가려집니다. 게이트웨이가 키를 거부하거나, `4401`로 연결을 닫거나,
 여는 타임아웃 안에 `auth.ok`가 오지 않으면 `connect`가 `Error::Authentication`을
-반환합니다. `Client`는 `connect`가 성공해야만 손에 들어오므로, 인증이 끝나기
-전에는 어떤 명령도 나갈 수 없습니다.
+반환합니다. 키에 허용 IP 목록이 있고 이 연결의 주소가 그 밖이면 게이트웨이는
+`ipNotAllowed`로 답합니다(close `4401`, reason `ip_not_allowed`). 이때 오류의
+`code`는 `ipNotAllowed`, `ip`는 게이트웨이가 확인한 주소(확인하지 못했으면
+`None`)이고, 같은 곳에서 다시 접속해도 같은 답이 옵니다. 게이트웨이가 키를 아예
+확인하지 못하면 `internalError`와 close `1011`로 답하고, `connect`는 이를
+`Error::Server`로 반환합니다. 키가 거부된 것이 아니므로 잠시 뒤 다시 접속하면
+됩니다. `Client`는 `connect`가 성공해야만 손에 들어오므로, 인증이 끝나기 전에는
+어떤 명령도 나갈 수 없습니다.
 
 내부 WebSocket 라이브러리인 tungstenite는 `trace` 레벨에서 프레임 원문을
 로그로 남깁니다. 운영 환경에서는 `tungstenite=trace` 로그를 켜지 마세요. 켜면
@@ -107,7 +114,7 @@ async fn main() -> Result<(), tello::Error> {
 | `Event::CallNoAnswer(CallEnded)` | `call.noAnswer` | `status`, `failure_reason` |
 | `Event::CallFailed(CallEnded)` | `call.failed` | `status`, `failure_reason` |
 | `Event::CallSummary(CallSummary)` | `call.summary` | `request_id`, `call_id`, `status`, `duration_seconds`, `transcript`, `summary`, `credit_charged` |
-| `Event::Error(ErrorEvent)` | `error` | `code`, `message`, `request_id`, `question` |
+| `Event::Error(ErrorEvent)` | `error` | `code`, `message`, `request_id`, `question`, `required_scope`, `ip` |
 | `Event::Disconnected` | — | SDK 자체 이벤트. 항상 연결의 마지막 이벤트 |
 | `Event::Unknown(Value)` | 그 밖의 값 | 원본 프레임. 이벤트 계약은 추가만 하는 방식입니다 |
 
@@ -177,6 +184,8 @@ GetSummary::new(call_id).request_id(id)
 | 게이트웨이 `code` | `Error` variant |
 | --- | --- |
 | `unauthenticated` | `Authentication` (인증 핸드셰이크. 4401 종료와 `auth.ok` 타임아웃 포함) |
+| `ipNotAllowed` | `Authentication` (`code`는 `ipNotAllowed`, `ip` 포함. 인증 핸드셰이크, 4401 종료) |
+| `insufficientScope` | `PermissionDenied` (`required_scope` 포함): 키에 `calls:write`(`createCall`·`answer`·`sendDtmf`·`cancel`)나 `calls:read`(`getSummary`) 권한이 없습니다. 그 명령만 거부되고 연결은 유지됩니다 |
 | `toRequired` | `Validation` |
 | `callIdRequired` | `Validation` |
 | `callNotFound` | `Validation` |
@@ -186,7 +195,7 @@ GetSummary::new(call_id).request_id(id)
 | `callAlreadyActive` | `CallAlreadyActive` |
 | `noActiveCall` | `NoActiveCall` |
 | `callRejected` | `CallRejected` (`question` 포함) |
-| `internalError` | `Server` |
+| `internalError` | `Server` (`auth` 응답이면 close 1011 동반: 잠시 뒤 다시 접속) |
 | 그 밖의 코드 | `Server` (코드는 그대로 보존) |
 
 게이트웨이에서 온 오류는 모두 `error.code()`로 코드를 돌려줍니다. **분기는
@@ -254,7 +263,134 @@ WS 수준 ping heartbeat는 게이트웨이가 10초마다 보내며, pong을 �
 응답합니다. 재연결이나 세션 재개 프로토콜은 없습니다. 비정상 종료가 나면
 재연결이 필요한 상황으로 보고 통화를 처음부터 다시 시작하세요.
 
-## 7. 예제
+## 7. REST 자원 API
+
+`tello::Api`는 WebSocket `Client`와 별개인 공개 REST API 클라이언트입니다. 같은
+서버용 API 키를 `Authorization: Bearer <key>`로 보내고, `Accept:
+application/json`, `User-Agent: tello-rust-sdk/<크레이트 버전>`, 본문이 있으면
+`Content-Type: application/json`을 붙입니다.
+
+```rust
+use std::time::Duration;
+
+use serde_json::json;
+use tello::{Api, ApiConfig, ListTools};
+
+#[tokio::main]
+async fn main() -> Result<(), tello::Error> {
+    // TELLO_API_KEY, 그리고 TELLO_API_URL 또는 https://api.telloai.io/v1 을 읽습니다.
+    let api = Api::from_env()?;
+    // 직접 지정할 수도 있습니다:
+    let _api = Api::new(
+        ApiConfig::new("tello_live_xxx")
+            .with_api_url("https://api.telloai.io/v1")
+            .with_timeout(Duration::from_secs(10)),
+    )?;
+
+    let page = api.tools().list(ListTools::new().limit(20)).await?;
+    println!("{}", page["data"]);
+
+    let body = json!({"type": "endCall", "name": "통화 종료", "functionName": "hang_up"});
+    let tool = api.tools().create(&body, Some("tool-hang-up-1")).await?;
+    println!("만든 도구 {}", tool["id"]);
+    Ok(())
+}
+```
+
+`ApiConfig::new(key)`는 `key`를, 그 값이 `""`이면 `TELLO_API_KEY`를 씁니다. 키가
+없으면 `Api::new`가 `Error::Config`로 실패합니다. base URL은 `with_api_url`,
+없으면 `TELLO_API_URL`, 없으면 `https://api.telloai.io/v1`입니다. `https`여야 하고
+(`http`는 `127.0.0.1`·`localhost`·`::1`만), 끝의 `/`는 무시합니다. 조회(list·get)는
+30초(`with_timeout`), 모든 쓰기(생성·수정·삭제, 크루 생성, 통화 초안)는
+120초(`with_long_timeout`) 뒤 타임아웃됩니다. 키는 오류에도 `Debug`에도 나오지
+않습니다. `Api`는 복제 비용이 싼 핸들입니다.
+
+본문과 결과는 `serde_json::Value` JSON 객체라서 이 버전이 모르는 칸도 그대로
+남습니다. 경로 id는 퍼센트 인코딩하고, 빈 id는 아무것도 보내지 않고
+`Error::InvalidArgument`로 거부합니다.
+
+| 메서드 | HTTP | 성공 | 반환 |
+| --- | --- | --- | --- |
+| `tools().list(ListTools::new().limit(n).cursor(c))` | `GET /tools?limit&cursor` | 200 | `{"data": [...], "nextCursor": …}` |
+| `tools().get(id)` | `GET /tools/{id}` | 200 | 도구 |
+| `tools().create(&body, key)` | `POST /tools` | 201 | 도구(`revision` 포함) |
+| `tools().update(id, &patch)` | `PATCH /tools/{id}` | 200 | 도구 |
+| `tools().delete(id)` | `DELETE /tools/{id}` | 204 | `()` |
+| `agents().list()` / `crews().list()` | `GET /agents` / `GET /crews` | 200 | `{"data": [...]}` |
+| `agents()` / `crews()` `.get` `.create` `.update` `.delete` | `/agents[/{id}]` / `/crews[/{id}]` | 200 / 201 / 200 / 204 | 에이전트·크루 / `()` |
+| `crews().generate(&input, key)` | `POST /crews/generate` | 202 (같은 목표의 작업이면 200) | 작업 `{"id", "status": "running", …}` |
+| `crews().generate_and_wait(&input, GenerateAndWait::new())` | generate 후 `GET /crew-generations/{id}` | | 끝난 작업 |
+| `crew_generations().get(id)` | `GET /crew-generations/{id}` | 200 | 작업 |
+| `call_drafts().create(&body, key)` | `POST /call-drafts` | 201 | 초안 |
+| `call_drafts().revise(draft_id, request, key)` | `POST /call-drafts/{id}/revise`, 본문 `{"request": …}` | 200 | **새 id**의 초안 |
+| `call_drafts().confirm(draft_id, key)` | `POST /call-drafts/{id}/confirm`, 본문 없음 | 201 | 통화 |
+
+`key`는 선택 `Idempotency-Key`(`Option<&str>`)이며 넘겼을 때만 보냅니다. 같은
+요청을 같은 키로 다시 보내면 첫 응답이 재생됩니다. 키는 쉼표 없는 출력 가능한
+ASCII 1~255자여야 하고, 아니면 아무것도 보내지 않고 `Error::InvalidArgument`로
+실패합니다. `confirm`은 항상 키를 보냅니다. `None`이면 UUID v4를 만듭니다.
+
+표와 다른 성공 상태나 JSON 객체가 아닌 본문은 `invalid_response` 오류입니다.
+초안의 모든 상태(`pendingConfirmation`, `needsClarification`, `refused`,
+`confirmed`)는 성공이니 `status`로 분기하세요.
+
+`generate_and_wait`는 작업이 `running`이 아닐 때까지 2초(`poll_interval`)마다
+조회하고 그 작업을 돌려줍니다. `failed` 작업도 오류가 아니라 그대로 돌려줍니다.
+600초(`timeout`)가 지나면 `Error::CrewGenerationTimeout { id, .. }`로 실패하며,
+작업은 서버에서 계속 진행됩니다.
+
+> **쓰기는 즉시 운영에 반영됩니다.** 도구·에이전트·크루의 생성·수정·삭제는 한
+> 요청에서 저장·배포·운영 반영까지 하고, 다음 통화부터 바로 쓰입니다.
+> **`call_drafts().confirm`은 실제 과금되는 전화를 겁니다.** 에이전트에 준비된
+> 시나리오가 있으면 `call_drafts().create`도 바로 겁니다(status `confirmed`).
+> 통제된 테스트 번호로만 시험하세요.
+
+SDK는 재시도하지 않습니다. 오류 응답은 `Error::Api(ApiError)`이며 `status`(HTTP),
+`code`(서버 `error` 원문 snake_case, 예: `tool_not_found`), `message`(표시용),
+`data`(봉투의 `data`, 없으면 `None`), `idempotency_key`(보낸 키, 없으면 `None`)를
+담습니다. 프록시 페이지처럼 오류 봉투가 없는 응답의 `code`는 `http_<status>`입니다.
+응답을 아예 받지 못하면(DNS, TCP, TLS, 연결 끊김, 타임아웃) `Error::ApiConnection`
+이고, 여기에도 `idempotency_key()`가 있습니다. **이렇게 실패한 쓰기는 이미
+반영됐을 수 있습니다.** get이나 list로 확인한 뒤 같은 키로 다시 보내세요.
+
+```rust
+async fn confirm(api: &tello::Api, draft_id: &str) -> Result<(), tello::Error> {
+    match api.call_drafts().confirm(draft_id, None).await {
+        Ok(call) => println!("발신 중: {}", call["id"]),
+        Err(tello::Error::Api(error)) if error.code == "draft_not_found" => {
+            eprintln!("없는 초안: {}", error.message);
+        }
+        Err(tello::Error::Api(error)) => {
+            eprintln!("{} {}: {:?}", error.status, error.code, error.data);
+        }
+        Err(tello::Error::ApiConnection(error)) => {
+            // 통화가 이미 걸렸을 수 있습니다. 새 키가 아니라 이 키로 다시 보냅니다.
+            let key = error.idempotency_key().unwrap_or_default().to_owned();
+            api.call_drafts().confirm(draft_id, Some(&key)).await?;
+        }
+        Err(other) => return Err(other),
+    }
+    Ok(())
+}
+```
+
+대표 코드(전체 목록은 Tello 개발자 문서의 REST 오류 페이지에 있습니다):
+
+| 상태 | `code` | 대응 |
+| --- | --- | --- |
+| 401 | `unauthenticated` | API 키를 확인합니다 |
+| 403 | `insufficient_scope` | 키에 `data.requiredScope` 권한을 줍니다 |
+| 403 | `ip_not_allowed` | 키의 허용 IP 밖에서 보낸 요청입니다(`data.ip`) |
+| 400 | `invalid_request` / `invalid_tool` / `invalid_agent` / `invalid_crew` | `data.detail`을 보고 본문을 고칩니다 |
+| 404 | `tool_not_found` / `agent_not_found` / `crew_not_found` | 이 계정의 id를 씁니다 |
+| 422 | `tool_not_publishable` / `agent_not_publishable` / `crew_not_publishable` | 아무것도 저장되지 않았습니다. `data.reason`을 봅니다 |
+| 409 | `crew_generation_in_progress` | 다른 목표를 만드는 중입니다. `data.id`가 그 작업입니다 |
+| 404 / 409 / 410 | `draft_not_found` / `draft_superseded` / `draft_expired` | 최신 초안을 쓰거나 처음부터 다시 만듭니다 |
+| 409 | `idempotency_in_progress` | 같은 키의 요청이 아직 처리 중입니다. 잠시 뒤 같은 키로 확인합니다 |
+| 502 | `write_outcome_unknown` | 이미 반영됐을 수 있습니다. 확인하기 전에는 새 키로 다시 만들지 않습니다 |
+| 503 | `upstream_unavailable` | 반영되지 않았습니다. 잠시 뒤 다시 보냅니다 |
+
+## 8. 예제
 
 ```bash
 TELLO_API_KEY=tello_live_xxx TELLO_URL=ws://localhost:3000/sdk \
@@ -266,7 +402,7 @@ placeholder 수신 번호 `+821012345678`을 통제된 테스트 번호로 바�
 자격 증명은 `examples/.env`에 두세요. 이 파일은 git에서 무시되고 패키지에도
 들어가지 않습니다.
 
-## 8. 버전 호환성
+## 9. 버전 호환성
 
 `tello-ai-sdk 0.1.x`는 Tello WS 프로토콜 `1.0`을 구현합니다
 (`tello::PROTOCOL_VERSION`).
@@ -274,5 +410,5 @@ placeholder 수신 번호 `+821012345678`을 통제된 테스트 번호로 바�
 전체 프레임 계약은 [`docs/protocol/sdk-ws.v1.md`](docs/protocol/sdk-ws.v1.md)에
 있고, [`docs/events/sdk-events.v1.schema.json`](docs/events/sdk-events.v1.schema.json)과
 [`docs/errors/errors.v1.json`](docs/errors/errors.v1.json)이 함께 따라옵니다. 이
-세 파일은 게이트웨이 구현 옆에 있는 정본 계약에서 복사한 생성물입니다. 읽기는
-여기서, 수정은 정본에서 하세요.
+세 파일은 API 게이트웨이(api-gateway) 구현 옆에 있는 정본 계약에서 복사한
+생성물입니다. 읽기는 여기서, 수정은 정본에서 하세요.

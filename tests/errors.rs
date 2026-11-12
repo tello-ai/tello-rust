@@ -8,6 +8,7 @@ use tello::{Error, Event};
 fn declared_exception(error: &Error) -> &'static str {
     match error {
         Error::Authentication { .. } => "AuthenticationError",
+        Error::PermissionDenied { .. } => "PermissionDeniedError",
         Error::Validation { .. } => "ValidationError",
         Error::CallAlreadyActive { .. } => "CallAlreadyActiveError",
         Error::NoActiveCall { .. } => "NoActiveCallError",
@@ -46,7 +47,7 @@ async fn received_errors(frames: &[Value]) -> Vec<tello::ErrorEvent> {
 #[tokio::test]
 async fn every_catalog_code_maps_to_its_declared_error() {
     let catalog = catalog();
-    assert_eq!(catalog.len(), 19, "errors.v1.json declares 19 codes");
+    assert_eq!(catalog.len(), 21, "errors.v1.json declares 21 codes");
 
     let frames: Vec<Value> = catalog
         .iter()
@@ -55,11 +56,15 @@ async fn every_catalog_code_maps_to_its_declared_error() {
                 "type": "error", "version": "1.0",
                 "code": entry["code"], "message": entry["message"], "requestId": "r-1",
             });
-            if entry["extra"]
-                .as_array()
-                .is_some_and(|extra| extra.contains(&json!("question")))
-            {
-                frame["question"] = json!("Who is calling?");
+            let extra = entry["extra"].as_array().cloned().unwrap_or_default();
+            for (field, value) in [
+                ("question", "Who is calling?"),
+                ("requiredScope", "calls:write"),
+                ("ip", "203.0.113.7"),
+            ] {
+                if extra.contains(&json!(field)) {
+                    frame[field] = json!(value);
+                }
             }
             frame
         })
@@ -103,6 +108,28 @@ async fn call_rejected_carries_the_question() {
         received[1].to_error(),
         Error::CallRejected { question: None, .. }
     ));
+}
+
+#[tokio::test]
+async fn insufficient_scope_is_permission_denied_with_the_required_scope() {
+    let received = received_errors(&[json!({
+        "type": "error", "version": "1.0", "code": "insufficientScope",
+        "message": "This server key does not have the scope required for this command",
+        "requestId": "r-9", "requiredScope": "calls:write",
+    })])
+    .await;
+
+    assert_eq!(received[0].required_scope.as_deref(), Some("calls:write"));
+    let error = received[0].to_error();
+    assert!(
+        matches!(
+            &error,
+            Error::PermissionDenied { code, required_scope: Some(scope), .. }
+                if code == "insufficientScope" && scope == "calls:write"
+        ),
+        "got {error:?}"
+    );
+    assert_eq!(error.code(), Some("insufficientScope"));
 }
 
 #[tokio::test]

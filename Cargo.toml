@@ -2,7 +2,7 @@
 name = "tello-ai-sdk"
 version = "0.1.0"
 edition = "2021"
-description = "Rust WebSocket SDK for the Tello /sdk protocol: place a phone call and answer each caller turn."
+description = "Rust SDK for Tello: the /sdk WebSocket protocol (place a phone call and answer each caller turn) and the public REST API (tools, agents, crews, call drafts)."
 license = "Apache-2.0"
 repository = "https://github.com/tello-ai/tello-rust"
 homepage = "https://telloai.io"
@@ -27,6 +27,9 @@ name = "tello"
 
 [dependencies]
 futures-util = { version = "0.3.34", default-features = false, features = ["sink", "std"] }
+# The REST client. No provider of its own: `Api` hands it the same ring-based
+# rustls config as the WebSocket, so it never looks for a process default.
+reqwest = { version = "0.13.5", default-features = false, features = ["rustls-no-provider"] }
 # An explicit ring provider: tokio-tungstenite enables rustls without any crypto
 # provider, so its default TLS config would panic on the first wss:// connect.
 rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
@@ -38,4 +41,4 @@ uuid = { version = "1.26", features = ["v4"] }
 webpki-roots = "1"
 
 [dev-dependencies]
-tokio = { version = "1.53", features = ["macros", "net", "rt", "rt-multi-thread", "sync", "time"] }
+tokio = { version = "1.53", features = ["io-util", "macros", "net", "rt", "rt-multi-thread", "sync", "time"] }

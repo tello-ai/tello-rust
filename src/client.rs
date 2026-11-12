@@ -19,15 +19,18 @@ use tokio_tungstenite::{Connector, MaybeTlsStream, WebSocketStream};
 
 use crate::command::{self, Answer, CreateCall, GetSummary, SendDtmf};
 use crate::config::{Config, ENV_API_KEY};
-use crate::error::{Error, TransportError, UNAUTHENTICATED};
+use crate::error::{Error, TransportError, INTERNAL_ERROR, IP_NOT_ALLOWED, UNAUTHENTICATED};
 use crate::event::{self, ErrorEvent, Event};
 
 type Socket = WebSocketStream<MaybeTlsStream<TcpStream>>;
 type Writer = SplitSink<Socket, Message>;
 type Reader = SplitStream<Socket>;
 
+const CLOSE_INTERNAL_ERROR: u16 = 1011;
 const CLOSE_UNAUTHENTICATED: u16 = 4401;
 const CLOSE_SESSION_REPLACED: u16 = 4429;
+/// The 4401 close reason when the key's allowed IP list excludes the client.
+const REASON_IP_NOT_ALLOWED: &str = "ip_not_allowed";
 
 /// Refuses a `createCall` because a call is active. It ends
 /// [`Client::wait_closed`] only when it answers the `createCall` that opened
@@ -96,11 +99,7 @@ impl Client {
             authenticate(&mut writer, &mut reader, config.api_key()),
         )
         .await
-        .unwrap_or_else(|_| {
-            Err(Error::Authentication {
-                message: "timed out waiting for auth.ok".to_owned(),
-            })
-        });
+        .unwrap_or_else(|_| Err(Error::unauthenticated("timed out waiting for auth.ok")));
         if let Err(error) = auth {
             // Best effort: the socket is being discarded either way.
             let _closed =
@@ -458,9 +457,9 @@ impl Shared {
         }
         let reason = frame.reason.as_str();
         state.close_error = match u16::from(frame.code) {
-            CLOSE_UNAUTHENTICATED => Some(Error::Authentication {
-                message: or_default(reason, UNAUTHENTICATED),
-            }),
+            CLOSE_UNAUTHENTICATED => {
+                Some(Error::unauthenticated(or_default(reason, UNAUTHENTICATED)))
+            }
             CLOSE_SESSION_REPLACED => Some(Error::SessionReplaced {
                 message: or_default(reason, "session replaced"),
             }),
@@ -547,7 +546,8 @@ async fn open(config: &Config) -> Result<Socket, Error> {
     let mut request = config.url().into_client_request().map_err(transport)?;
     *request.uri_mut() = with_identity(request.uri()).map_err(transport)?;
     let connector = if request.uri().scheme_str() == Some("wss") {
-        Connector::Rustls(tls_config()?)
+        let tls = tls_config().map_err(|error| Error::Transport(TransportError::tls(error)))?;
+        Connector::Rustls(Arc::new(tls))
     } else {
         Connector::Plain
     };
@@ -643,19 +643,17 @@ fn encode_query_value(value: &str) -> String {
     out
 }
 
-/// rustls with the ring provider and the webpki root set, so `wss://` works
-/// without OpenSSL or a process-wide default provider.
-fn tls_config() -> Result<Arc<rustls::ClientConfig>, Error> {
+/// rustls with the ring provider and the webpki root set, so `wss://` and the
+/// REST API work without OpenSSL or a process-wide default provider.
+pub(crate) fn tls_config() -> Result<rustls::ClientConfig, rustls::Error> {
     let roots = rustls::RootCertStore {
         roots: webpki_roots::TLS_SERVER_ROOTS.to_vec(),
     };
     let provider = Arc::new(rustls::crypto::ring::default_provider());
-    let config = rustls::ClientConfig::builder_with_provider(provider)
-        .with_safe_default_protocol_versions()
-        .map_err(|error| Error::Transport(TransportError::tls(error)))?
+    Ok(rustls::ClientConfig::builder_with_provider(provider)
+        .with_safe_default_protocol_versions()?
         .with_root_certificates(roots)
-        .with_no_client_auth();
-    Ok(Arc::new(config))
+        .with_no_client_auth())
 }
 
 /// Sends the `auth` frame and waits for the reply. The key only ever goes into
@@ -687,25 +685,35 @@ async fn authenticate(
         };
         return match reply.get("type").and_then(Value::as_str) {
             Some("auth.ok") => Ok(()),
-            Some("error") if reply.get("code").and_then(Value::as_str) == Some(UNAUTHENTICATED) => {
-                Err(Error::Authentication {
-                    message: or_default(
-                        reply.get("message").and_then(Value::as_str).unwrap_or(""),
-                        UNAUTHENTICATED,
-                    ),
-                })
-            }
-            _ => Err(Error::Authentication {
-                message: "unexpected authentication response".to_owned(),
-            }),
+            // unauthenticated and ipNotAllowed refuse the key; internalError
+            // means the gateway could not check it (close 1011, retry later).
+            Some("error") => match event::parse(reply) {
+                Event::Error(mut error) => {
+                    if error.message.is_empty() {
+                        error.message.clone_from(&error.code);
+                    }
+                    Err(error.to_error())
+                }
+                _ => Err(Error::unauthenticated("unexpected authentication response")),
+            },
+            _ => Err(Error::unauthenticated("unexpected authentication response")),
         };
     }
 }
 
 fn auth_close_error(frame: Option<&CloseFrame>) -> Error {
     match frame.map(|frame| (u16::from(frame.code), frame.reason.as_str())) {
-        Some((CLOSE_UNAUTHENTICATED, reason)) => Error::Authentication {
-            message: or_default(reason, UNAUTHENTICATED),
+        Some((CLOSE_UNAUTHENTICATED, REASON_IP_NOT_ALLOWED)) => Error::Authentication {
+            code: IP_NOT_ALLOWED.to_owned(),
+            message: REASON_IP_NOT_ALLOWED.to_owned(),
+            ip: None,
+        },
+        Some((CLOSE_UNAUTHENTICATED, reason)) => {
+            Error::unauthenticated(or_default(reason, UNAUTHENTICATED))
+        }
+        Some((CLOSE_INTERNAL_ERROR, reason)) => Error::Server {
+            code: INTERNAL_ERROR.to_owned(),
+            message: or_default(reason, "internal_error"),
         },
         Some((CLOSE_SESSION_REPLACED, reason)) => Error::SessionReplaced {
             message: or_default(reason, "session replaced"),

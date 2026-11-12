@@ -1,17 +1,19 @@
 {
   "version": "1.0",
-  "source": "turn-provider-gateway/src/infrastructure/ws/sdk-protocol.ts",
-  "canonicalPath": "turn-provider-gateway/docs/errors/errors.v1.json",
+  "source": "api-gateway/src/infrastructure/ws/sdk-protocol.ts",
+  "canonicalPath": "api-gateway/docs/errors/errors.v1.json",
   "note": "Copies of this file inside SDK client repos are generated. Edit the canonical path, then copy outward.",
   "frame": {
-    "description": "Flat error frame sent by turn-provider-gateway /sdk (not wrapped in an {error:{...}} envelope).",
+    "description": "Flat error frame sent by api-gateway /sdk (not wrapped in an {error:{...}} envelope).",
     "fields": {
       "type": "error",
       "version": "1.0",
       "code": "string",
-      "message": "string (TPG's own English sentence for the code; display text only, never branch on it)",
+      "message": "string (api-gateway's own English sentence for the code; display text only, never branch on it)",
       "requestId": "string (optional, echoes the client's requestId on the failed command)",
-      "question": "string (optional, present for callRejected)"
+      "question": "string (optional, present for callRejected)",
+      "requiredScope": "string (optional, present for insufficientScope: the server key scope the command needs)",
+      "ip": "string or null (optional, present for ipNotAllowed: the connection's address as our edge proved it, null when it proved none)"
     }
   },
   "errors": [
@@ -20,7 +22,24 @@
       "message": "Authentication required",
       "closeCode": 4401,
       "sdkException": "AuthenticationError",
-      "note": "The client's own api key was refused, or no auth frame arrived within 10s."
+      "note": "The client's own server key was refused, or no auth frame arrived within 10s."
+    },
+    {
+      "code": "ipNotAllowed",
+      "message": "The request IP address is not in this server key's allowed IP list",
+      "closeCode": 4401,
+      "sdkException": "AuthenticationError",
+      "extra": ["ip"],
+      "retryable": false,
+      "note": "Answers auth when the server key has an allowed IP list and this connection's address is not on it, or could not be proven. Reconnecting from the same place gets the same answer."
+    },
+    {
+      "code": "insufficientScope",
+      "message": "This server key does not have the scope required for this command",
+      "sdkException": "PermissionDeniedError",
+      "extra": ["requiredScope"],
+      "retryable": false,
+      "note": "createCall, answer, sendDtmf and cancel need calls:write; getSummary needs calls:read. Only the command is refused; the connection stays open. New in this version: an SDK without the code surfaces it as its generic server error."
     },
     {
       "code": "callAlreadyActive",
@@ -74,7 +93,7 @@
       "sdkException": "CallRefusedError",
       "group": "accountPolicy",
       "retryable": false,
-      "note": "Tell the user to top up. TPG also emits this from its own pre-dial credit check."
+      "note": "Tell the user to top up. api-gateway also emits this from its own pre-dial credit check."
     },
     {
       "code": "concurrentLimitExceeded",
@@ -128,13 +147,13 @@
       "sdkException": "CallProviderError",
       "group": "serviceSide",
       "retryable": false,
-      "note": "The provider refused and TPG could not classify the refusal. Distinct from internalError: no call was created."
+      "note": "The provider refused and api-gateway could not classify the refusal. Distinct from internalError: no call was created."
     },
     {
       "code": "internalError",
       "message": "Internal error",
       "sdkException": "TelloServerError",
-      "note": "Reserved for faults inside TPG itself."
+      "note": "Reserved for faults inside api-gateway itself. Answering auth (the server key could not be checked, e.g. the key store did not answer), it comes with close 1011: the key was not refused, so the client may reconnect later. On a command it leaves the connection open."
     }
   ]
 }

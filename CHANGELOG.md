@@ -1,10 +1,43 @@
 # Changelog
 
+## Unreleased
+
+- `tello::Api`: a client of the public REST API (`/v1`), separate from the
+  WebSocket `Client`. `tools()`, `agents()` and `crews()` list, get, create,
+  update and delete; `crews().generate()` and `crew_generations().get()`
+  start and read crew generation jobs, and `crews().generate_and_wait()`
+  polls until the job is no longer running; `call_drafts()` creates,
+  revises and confirms call drafts. Bodies and results are
+  `serde_json::Value` objects.
+- `ApiConfig` takes the API key or `TELLO_API_KEY`, and the base URL from
+  `TELLO_API_URL` or `https://api.telloai.io/v1` (`https` only; `http` for
+  loopback hosts). Reads time out after 30s and writes after 120s. Requests
+  carry `User-Agent: tello-rust-sdk/<version>` and are never retried.
+- New errors: `Error::Api(ApiError)` with the HTTP status, the server's
+  snake_case `code`, `message`, `data` and the idempotency key sent
+  (`http_<status>` for non-envelope answers, `invalid_response` for an
+  undocumented success status or a body that is not a JSON object);
+  `Error::ApiConnection` for transport failures and timeouts, also carrying
+  the key; `Error::InvalidArgument` for an empty id or an idempotency key
+  that is not 1-255 printable ASCII characters without a comma;
+  `Error::CrewGenerationTimeout`. `call_drafts().confirm` generates a UUID
+  v4 key when none is given.
+- The REST client uses reqwest with the same ring-based rustls config as the
+  WebSocket, so no process-wide crypto provider is needed.
+- WebSocket: `ipNotAllowed` answering `auth` is `Error::Authentication`, which
+  now carries `code` (`unauthenticated` or `ipNotAllowed`) and `ip`
+  alongside `message`. `insufficientScope` is the new
+  `Error::PermissionDenied` with `required_scope`; `ErrorEvent` gains
+  `required_scope` and `ip`. `internalError` answering `auth`, or close
+  `1011` during auth, is `Error::Server` instead of `Error::Authentication`.
+- The protocol contract copies under `docs/` are synced from the gateway,
+  now named the API gateway (api-gateway).
+
 ## 0.1.0 (unreleased)
 
-First release. Implements Tello WS protocol `1.0` against the turn-provider-gateway
-`/sdk` endpoint, with the same semantics as tello-go, tello-js, tello-python and
-tello-java.
+First release. Implements Tello WS protocol `1.0` against the API gateway
+(api-gateway, formerly turn-provider-gateway) `/sdk` endpoint, with the same
+semantics as tello-go, tello-js, tello-python and tello-java.
 
 - `Client::connect` authenticates in-band: the first frame is `auth`, and it
   returns only after `auth.ok`, which is consumed. An `unauthenticated` error
