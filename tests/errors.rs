@@ -47,7 +47,7 @@ async fn received_errors(frames: &[Value]) -> Vec<tello::ErrorEvent> {
 #[tokio::test]
 async fn every_catalog_code_maps_to_its_declared_error() {
     let catalog = catalog();
-    assert_eq!(catalog.len(), 19, "errors.v1.json declares 19 codes");
+    assert_eq!(catalog.len(), 21, "errors.v1.json declares 21 codes");
 
     let frames: Vec<Value> = catalog
         .iter()
