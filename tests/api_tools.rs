@@ -130,7 +130,16 @@ async fn invalid_idempotency_keys_are_refused_without_a_request() {
     let api = fake.api();
     let too_long = "k".repeat(256);
 
-    for key in ["", "a,b", "a\nb", "a\tb", "a\u{7f}b", too_long.as_str()] {
+    for key in [
+        "",
+        "a,b",
+        "a\nb",
+        "a\tb",
+        "a\u{7f}b",
+        "키-1",
+        "caf\u{e9}",
+        too_long.as_str(),
+    ] {
         let error = api
             .tools()
             .create(&json!({}), Some(key))

@@ -31,7 +31,7 @@ const DEFAULT_TIMEOUT: Duration = Duration::from_secs(30);
 const DEFAULT_LONG_TIMEOUT: Duration = Duration::from_secs(120);
 const USER_AGENT: &str = concat!("tello-rust-sdk/", env!("CARGO_PKG_VERSION"));
 const IDEMPOTENCY_KEY: &str = "idempotency-key";
-const MAX_IDEMPOTENCY_KEY_BYTES: usize = 255;
+const MAX_IDEMPOTENCY_KEY_LEN: usize = 255;
 
 const OK: &[StatusCode] = &[StatusCode::OK];
 const CREATED: &[StatusCode] = &[StatusCode::CREATED];
@@ -438,17 +438,17 @@ fn base_url(raw: &str) -> Result<Url, Error> {
     Ok(url)
 }
 
-/// Checks a caller's idempotency key: 1 to 255 bytes, no comma, no control
-/// character.
+/// Checks a caller's idempotency key: 1 to 255 printable ASCII characters
+/// (0x20 to 0x7E), no comma.
 fn idempotency_key_header(key: &str) -> Result<HeaderValue, Error> {
-    if key.is_empty() || key.len() > MAX_IDEMPOTENCY_KEY_BYTES {
+    if key.is_empty() || key.len() > MAX_IDEMPOTENCY_KEY_LEN {
         return Err(Error::InvalidArgument(format!(
-            "an idempotency key must be 1 to {MAX_IDEMPOTENCY_KEY_BYTES} bytes"
+            "an idempotency key must be 1 to {MAX_IDEMPOTENCY_KEY_LEN} characters"
         )));
     }
-    if key.chars().any(|c| c == ',' || c.is_control()) {
+    if !key.bytes().all(|b| (0x20..=0x7e).contains(&b) && b != b',') {
         return Err(Error::InvalidArgument(
-            "an idempotency key must not contain a comma or a control character".into(),
+            "an idempotency key must be printable ASCII without a comma".into(),
         ));
     }
     HeaderValue::from_str(key).map_err(|_| {
