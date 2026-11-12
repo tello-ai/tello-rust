@@ -227,3 +227,28 @@ async fn delete_answered_with_200_is_an_invalid_response() {
 
     assert_eq!(error.code(), Some("invalid_response"));
 }
+
+#[tokio::test]
+async fn writes_use_the_long_timeout_and_reads_the_short_one() {
+    let mut fake = FakeApi::start().await;
+    let slow =
+        |reply: Reply| Reply::Delayed(std::time::Duration::from_millis(300), Box::new(reply));
+    fake.reply(slow(Reply::Json(201, json!({"id": "1"}))));
+    fake.reply(slow(Reply::Json(200, json!({"id": "1"}))));
+    fake.reply(slow(Reply::Empty(204)));
+    fake.reply(slow(Reply::Json(200, json!({"id": "1"}))));
+    let api = fake.api_with(|config| {
+        config
+            .with_timeout(std::time::Duration::from_millis(100))
+            .with_long_timeout(std::time::Duration::from_secs(5))
+    });
+
+    api.tools().create(&json!({}), None).await.expect("create");
+    api.tools().update("1", &json!({})).await.expect("update");
+    api.tools().delete("1").await.expect("delete");
+    let error = api.tools().get("1").await.expect_err("get is short");
+    assert!(matches!(error, Error::ApiConnection(_)), "{error:?}");
+    for _ in 0..4 {
+        fake.request().await;
+    }
+}

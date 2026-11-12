@@ -64,8 +64,8 @@ pub struct ApiConfig {
 impl ApiConfig {
     /// Uses `api_key`, or `TELLO_API_KEY` when it is empty. The base URL is
     /// `TELLO_API_URL` when set, otherwise [`DEFAULT_API_URL`]. Requests time
-    /// out after 30s; call draft create, revise and confirm and crew
-    /// generation after 120s.
+    /// out after 30s; writes (create, update, delete, crew generation, call
+    /// drafts) after 120s.
     ///
     /// A missing key is reported by [`Api::new`] as
     /// [`Error::Config`](crate::Error::Config).
@@ -86,15 +86,16 @@ impl ApiConfig {
         self
     }
 
-    /// Bounds each request, from connecting to the end of the response body,
-    /// except the ones [`with_long_timeout`](Self::with_long_timeout) covers.
+    /// Bounds each read (list, get), from connecting to the end of the
+    /// response body.
     pub fn with_timeout(mut self, timeout: Duration) -> Self {
         self.timeout = timeout;
         self
     }
 
-    /// Bounds call draft create, revise and confirm and crew generation,
-    /// which may wait for the server to write a scenario or build a crew.
+    /// Bounds each write: tool, agent and crew create, update and delete,
+    /// crew generation, and call draft create, revise and confirm. They save
+    /// and deploy, write a scenario, or build a crew before answering.
     pub fn with_long_timeout(mut self, timeout: Duration) -> Self {
         self.long_timeout = timeout;
         self
@@ -261,18 +262,23 @@ impl Api {
         self.object(
             Request::new(Method::POST, &[collection], CREATED)
                 .body(body)
-                .idempotency_key(idempotency_key),
+                .idempotency_key(idempotency_key)
+                .long(),
         )
         .await
     }
 
     async fn update_item(&self, collection: &str, id: &str, patch: &Value) -> Result<Value, Error> {
-        self.object(Request::new(Method::PATCH, &[collection, id], OK).body(patch))
-            .await
+        self.object(
+            Request::new(Method::PATCH, &[collection, id], OK)
+                .body(patch)
+                .long(),
+        )
+        .await
     }
 
     async fn delete_item(&self, collection: &str, id: &str) -> Result<(), Error> {
-        self.send(Request::new(Method::DELETE, &[collection, id], NO_CONTENT))
+        self.send(Request::new(Method::DELETE, &[collection, id], NO_CONTENT).long())
             .await
             .map(drop)
     }

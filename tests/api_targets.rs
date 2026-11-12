@@ -193,3 +193,28 @@ async fn empty_ids_are_refused_without_a_request() {
         fake.assert_no_request();
     }
 }
+
+#[tokio::test]
+async fn writes_use_the_long_timeout() {
+    for resource in ["agents", "crews"] {
+        let fake = FakeApi::start().await;
+        let slow =
+            |reply: Reply| Reply::Delayed(std::time::Duration::from_millis(300), Box::new(reply));
+        fake.reply(slow(Reply::Json(201, json!({"id": "1"}))));
+        fake.reply(slow(Reply::Json(200, json!({"id": "1"}))));
+        fake.reply(slow(Reply::Empty(204)));
+        let api = fake.api_with(|config| {
+            config
+                .with_timeout(std::time::Duration::from_millis(100))
+                .with_long_timeout(std::time::Duration::from_secs(5))
+        });
+
+        create(&api, resource, &json!({}), None)
+            .await
+            .expect(resource);
+        update(&api, resource, "1", &json!({}))
+            .await
+            .expect(resource);
+        delete(&api, resource, "1").await.expect(resource);
+    }
+}
